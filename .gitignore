@@ -60,3 +60,39 @@ target/
 
 #Ipython Notebook
 .ipynb_checkpoints
+
+# Virtualenv things.
+bin/activate
+bin/activate.csh
+bin/activate.fish
+bin/activate_this.py
+bin/cygdb
+bin/cython
+bin/cythonize
+bin/easy_install*
+bin/f2py3
+bin/get_env_details
+bin/iptest*
+bin/ipython*
+bin/pip*
+bin/postactivate
+bin/postdeactivate
+bin/preactivate
+bin/predeactivate
+bin/python*
+bin/tensorboard
+bin/theano-cache
+bin/theano-nose
+bin/theano-test
+bin/wheel
+bin/pbr
+bin/virtualenv-clone
+bin/virtualenvwrapper.sh
+bin/virtualenvwrapper_lazy.sh
+src/package*
+share
+include
+
+# # Swap files
+*.swp
+
