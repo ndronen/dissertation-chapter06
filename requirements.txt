@@ -1,0 +1,25 @@
+progressbar2
+jellyfish
+virtualenv
+pyenchant
+ipython==4.1.1
+ipython-genutils==0.1.0
+Cython==0.23.4
+joblib==0.9.4
+pandas==0.17.1
+path.py==8.1.2
+pickleshare==0.6
+pip==1.5.6
+protobuf==3.0.0b2
+python-dateutil==2.5.0
+pytz==2015.7
+scipy==0.17.0
+setuptools==20.2.2
+simplegeneric==0.8.1
+six==1.10.0
+traitlets==4.1.0
+wheel==0.29.0
+git+git://github.com/Theano/Theano.git#egg=theano
+git+git://github.com/fchollet/keras.git@763a2a953638ac1a1374c11d65716938060553c0#egg=keras
+#Modeling-package==0.0.0, /export/home/ndronen/proj/modeling
+#Spelling-package==0.0.0, /export/home/ndronen/proj/spelling
