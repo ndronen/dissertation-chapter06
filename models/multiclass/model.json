@@ -1,0 +1,60 @@
+{
+    "description": "multiclass classification model that predicts the true correction for a spelling error given the error and its context",
+    "non_word_input_name": "non_word_input",
+    "context_input_name": "context_input",
+    "target_name": "multiclass_correction_target",
+
+    "model_non_word_input_width": 28,
+    "model_context_input_width": 5,
+
+    "data_path": "data/contexts-100-words-1000-contexts-per-word.pkl",
+    "min_frequency": 50,
+    "min_length": 6,
+    "max_length": 25,
+
+    "n_non_word_embed_dims": 10,
+    "n_non_word_embeddings": 255,
+    "n_non_word_filters": 100,
+    "non_word_filter_width": 6,
+
+    "n_context_embed_dims": 100,
+    "n_context_embeddings": 0,
+    "n_context_filters": 100,
+    "context_filter_width": 5,
+
+    "fully_connected": [],
+    "n_residual_blocks": 0,
+    "n_hidden_residual": 0,
+
+    "train_embeddings": true,
+    "train_filters": true,
+    "embedding_init": "uniform",
+    "batch_normalization": false,
+
+    "optimizer": "Adam",
+    "clipnorm": 0,
+    "loss": "categorical_crossentropy",
+
+    "dropout_embedding_p": 0.0,
+    "dropout_conv_p": 0.0,
+    "dropout_fc_p": 0.5,
+    "gaussian_noise_sd": 0.0,
+
+    "class_weight_exponent": 1,
+    "patience": 100,
+    "n_epoch": 10000,
+    "batch_size": 32,
+    "seed": 17,
+    "samples_per_epoch": 10000,
+    "n_worker": 128,
+    "n_val_samples": 2000,
+
+    "embedding_max_norm": 1000,
+    "filter_max_norm": 1000,
+    "dense_max_norm": 10,
+    "residual_max_norm": 10,
+    "softmax_max_norm": 10,
+    "l2_penalty": 0.0,
+    "border_mode": "valid",
+    "dense_init": "glorot_uniform"
+}
