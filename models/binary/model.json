@@ -1,0 +1,81 @@
+{
+    "description": "binary classification model that predicts the true correction for a spelling error given the error and its context, where the non-word in the context has been replaced by a dictionary suggestion",
+    "non_word_char_input_name": "non_word_char_input",
+    "real_word_char_input_name": "real_word_char_input",
+    "real_word_input_name": "real_word_input",
+    "context_input_name": "context_input",
+    "target_name": "binary_correction_target",
+    "non_word_generator": "LearnedEditTransformer",
+    "min_edits": 1,
+    "max_edits": 1,
+
+    "pickle_path": "data/contexts-500-words-500-contexts-per-word.pkl",
+    "min_frequency": 50,
+    "min_length": 6,
+    "max_length": 25,
+
+    "merge_mode": "concat",
+
+    "char_input_width": 18,
+    "n_char_embed_dims": 10,
+    "n_char_embeddings": 255,
+    "n_char_filters": 1000,
+    "char_filter_width": 7,
+    "char_merge_mode": "cos",
+    "char_merge_n_hidden": 1,
+    "char_merge_act": "tanh",
+
+    "context_input_width": 5,
+    "n_context_embed_dims": 100,
+    "n_context_embeddings": null,
+    "n_context_filters": 1000,
+    "context_filter_width": 5,
+
+    "real_word_input_width": 1,
+    "n_real_word_embed_dims": 100,
+    "n_real_word_embeddings": null,
+    "use_real_word_embedding": false,
+
+    "fully_connected": [200],
+    "n_residual_blocks": 0,
+    "n_hidden_residual": 0,
+
+    "train_embeddings": true,
+    "train_filters": true,
+    "embedding_init": "uniform",
+    "batch_normalization": false,
+
+    "optimizer": "Adam",
+    "clipnorm": 0,
+    "loss": "categorical_crossentropy",
+
+    "dropout_embedding_p": 0.0,
+    "dropout_conv_p": 0.0,
+    "dropout_fc_p": 0.0,
+    "gaussian_noise_sd": 0.0,
+
+    "class_weight_exponent": 1,
+    "patience": 20,
+    "n_epoch": 1000,
+    "batch_size": 32,
+    "random_state": 17,
+    "samples_per_epoch": 10000,
+    "n_worker": 1,
+    "n_val_samples": 1000,
+    "fixed_callback_validation_data": false,
+
+    "mode": "transient",
+    "callback_monitor": "f1",
+    "callback_monitor_mode": "max",
+    "model_checkpoint_file": "model.h5",
+    "save_best_only": true,
+
+    "embedding_max_norm": 1000,
+    "filter_max_norm": 1000,
+    "dense_max_norm": 10,
+    "residual_max_norm": 10,
+    "softmax_max_norm": 10,
+    "l2_penalty": 0.0,
+    "border_mode": "valid",
+    "dense_init": "glorot_uniform"
+}
