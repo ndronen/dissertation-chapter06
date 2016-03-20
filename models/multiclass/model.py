@@ -1,13 +1,34 @@
+import string
+
 from modeling.callbacks import DenseWeightNormCallback
-from chapter05.dataset import MulticlassModelDatasetGenerator, ScheduledMulticlassModelDatasetGenerator, LengthIndexedPool
+from chapter06.dataset import (
+        MulticlassLoader,
+        MulticlassSplitter,
+        MulticlassGenerator,
+        ContextTokenizer,
+        ContextWindowTransformer,
+        MulticlassNonwordTransformer,
+        MulticlassContextTransformer,
+        RandomWordTransformer,
+        LearnedEditTransformer)
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.cross_validation import train_test_split
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.utils import check_random_state
+
+from spelling.edits import Editor
 from spelling.utils import build_progressbar
 
 import sys
+# You need to increase the recursion limit to compile many-layered
+# residual networks.  I think it's a Theano implementation detail,
+# not a Keras one.  I suspect the stack depth limit would not be
+# exceeded with many-layered residual networks when using TensorFlow
+# as the Keras backend....
 sys.setrecursionlimit(5000)
+import pickle
 import threading
 
 import numpy as np
@@ -44,35 +65,73 @@ def add_bn_relu(graph, config, prev_layer):
     return relu_name
 
 def build_model(config, n_classes):
-    np.random.seed(config.seed)
+    np.random.seed(config.random_state)
 
     graph = Graph()
 
-    graph.add_input(config.non_word_input_name,
-            input_shape=(config.model_input_width,), dtype='int')
-    graph.add_node(build_embedding_layer(config, input_width=config.model_input_width),
-            name='non_word_embedding', input=config.non_word_input_name)
-    conv = build_convolutional_layer(config)
-    conv.trainable = config.train_filters
-    graph.add_node(conv, name='non_word_conv', input='non_word_embedding')
+    # Character-level input for the non-word error.
+    graph.add_input(config.non_word_char_input_name,
+            input_shape=(config.non_word_char_input_width,), dtype='int')
+    non_word_embedding = build_embedding_layer(config,
+            input_width=config.non_word_char_input_width,
+            n_embeddings=config.n_char_embeddings,
+            n_embed_dims=config.n_char_embed_dims)
+    graph.add_node(non_word_embedding,
+            name='non_word_embedding', input=config.non_word_char_input_name)
+    non_word_conv = build_convolutional_layer(config,
+            n_filters=config.n_char_filters,
+            filter_width=config.char_filter_width)
+    non_word_conv.trainable = config.train_filters
+    graph.add_node(non_word_conv, name='non_word_conv', input='non_word_embedding')
     non_word_prev_layer = add_bn_relu(graph, config, 'non_word_conv')
-    graph.add_node(build_pooling_layer(config, input_width=config.model_input_width),
+    non_word_pool = build_pooling_layer(config,
+            input_width=config.non_word_char_input_width,
+            filter_width=config.char_filter_width)
+    graph.add_node(non_word_pool,
             name='non_word_pool', input=non_word_prev_layer)
     graph.add_node(Flatten(), name='non_word_flatten', input='non_word_pool')
-    prev_layer = 'non_word_flatten'
-    if config.gaussian_noise_sd > 0.:
-        print('gaussian noise %.02f' % config.gaussian_noise_sd)
-        graph.add_node(GaussianNoise(config.gaussian_noise_sd),
-                name="non_word_noise", input="non_word_flatten")
-        prev_layer = 'non_word_noise'
+    prev_non_word_layer = 'non_word_flatten'
+
+    # Word-level input for the context of the non-word error.
+    graph.add_input(config.context_input_name,
+            input_shape=(config.context_input_width,), dtype='int')
+    context_embedding = build_embedding_layer(config,
+            input_width=config.context_input_width,
+            n_embeddings=config.n_context_embeddings,
+            n_embed_dims=config.n_context_embed_dims)
+    graph.add_node(context_embedding,
+            name='context_embedding', input=config.context_input_name)
+    context_conv = build_convolutional_layer(config,
+            n_filters=config.n_context_filters,
+            filter_width=config.context_filter_width)
+    context_conv.trainable = config.train_filters
+    graph.add_node(context_conv, name='context_conv', input='context_embedding')
+    context_prev_layer = add_bn_relu(graph, config, 'context_conv')
+    context_pool = build_pooling_layer(config,
+            input_width=config.context_input_width,
+            filter_width=config.context_filter_width)
+    graph.add_node(context_pool,
+            name='context_pool', input=context_prev_layer)
+    graph.add_node(Flatten(), name='context_flatten', input='context_pool')
+    prev_context_layer = 'context_flatten'
+
+    if config.pool_merge_mode == 'cos':
+        dot_axes = ([1], [1])
+    else:
+        dot_axes = -1
 
     # Add some number of fully-connected layers without skip connections.
-    last_dense_layer = None
+    prev_layer = None
     for i,n_hidden in enumerate(config.fully_connected):
         layer_name = 'dense%02d' %i
-        #l = build_dense_layer(config, n_hidden=n_hidden)
-        l = Dense(n_hidden, init=config.dense_init, W_constraint=maxnorm(config.dense_max_norm))
-        graph.add_node(l, name=layer_name, input=prev_layer)
+        l = build_dense_layer(config, n_hidden=n_hidden)
+        if i == 0:
+            graph.add_node(l, name=layer_name,
+                    inputs=[prev_non_word_layer, prev_context_layer],
+                    merge_mode=config.pool_merge_mode,
+                    dot_axes=dot_axes)
+        else:
+            graph.add_node(l, name=layer_name, input=prev_layer)
         prev_layer = layer_name
         if config.batch_normalization:
             graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
@@ -81,7 +140,8 @@ def build_model(config, n_classes):
         if config.dropout_fc_p > 0.:
             graph.add_node(Dropout(config.dropout_fc_p), name=layer_name+'do', input=prev_layer)
             prev_layer = layer_name+'do'
-        last_dense_layer = layer_name
+
+        #prev_layer = layer_name
     
     # Add sequence of residual blocks.
     for i in range(config.n_residual_blocks):
@@ -143,6 +203,206 @@ def build_model(config, n_classes):
     return graph
 
 
+def build_transformers(config, vocabulary):
+    non_word_generator = globals()[config.non_word_generator](
+            min_edits=config.min_edits,
+            max_edits=config.max_edits)
+
+    non_word_input_transformer = MulticlassNonwordTransformer(
+            output_width=config.non_word_char_input_width)
+
+    context_input_transformer = MulticlassContextTransformer(
+            vocabulary=vocabulary,
+            output_width=config.context_input_width,
+            unk_index=int(config.context_input_width/2))
+
+    return (non_word_generator,
+            non_word_input_transformer,
+            context_input_transformer)
+
+def build_vocabulary(word_to_context):
+    # Fit the vocabulary over all the contexts.
+    all_contexts = []
+    for word,contexts in word_to_context.items():
+        all_contexts.append(word)
+        # De-tokenize just for the CountVectorizer.
+        all_contexts.extend([' '.join(c) for c in contexts])
+    vectorizer = CountVectorizer()
+    vectorizer.fit(all_contexts)
+
+    vocabulary = vectorizer.vocabulary_
+    vocabulary[''] = len(vocabulary)
+    vocabulary['<UNK>'] = len(vocabulary)
+    # Start-of-word marker.
+    vocabulary['^'] = len(vocabulary)
+    # End-of-word marker.
+    vocabulary['$'] = len(vocabulary)
+    for letter in string.ascii_letters:
+        if letter not in vocabulary:
+            vocabulary[letter] = len(vocabulary)
+    return vocabulary
+
+def load_word_to_context(config):
+    loader = MulticlassLoader(pickle_path=config.pickle_path)
+    word_to_context = loader.load()
+
+    # Tokenize the contexts.
+    tokenizer = ContextTokenizer()
+    for word,contexts in word_to_context.items():
+        word_to_context[word] = tokenizer.transform(contexts)
+
+    # Turn the contexts into just their windows.
+    windower = ContextWindowTransformer(window_size=config.context_input_width)
+    for word,contexts in word_to_context.items():
+        word_to_context[word] = windower.transform(contexts, [word] * len(contexts))
+
+    return word_to_context
+
+def build_generators(word_to_context, vocabulary, config):
+    splitter = MulticlassSplitter(
+            word_to_context=word_to_context,
+            random_state=config.random_state)
+
+    train_data, valid_data, test_data = splitter.split()
+
+    def dataset_size(dataset):
+        return sum([len(v) for v in dataset.values()])
+
+    print('train %d validation %d test %d' % (
+        dataset_size(train_data),
+        dataset_size(valid_data),
+        dataset_size(test_data)))
+
+    non_word_generator, non_word_input_transformer, \
+            context_input_transformer = build_transformers(
+                    config, vocabulary)
+
+    # Fit the label encoder only over the words we're correcting.
+    label_encoder = build_label_encoder(
+            list(word_to_context.keys()))
+
+    train_generator = MulticlassGenerator(train_data,
+            non_word_generator,
+            non_word_input_transformer,
+            context_input_transformer,
+            label_encoder,
+            non_word_char_input_name=config.non_word_char_input_name,
+            context_input_name=config.context_input_name,
+            target_name=config.target_name,
+            n_classes=len(word_to_context.keys()))
+
+    valid_generator = MulticlassGenerator(valid_data,
+            non_word_generator,
+            non_word_input_transformer,
+            context_input_transformer,
+            label_encoder,
+            non_word_char_input_name=config.non_word_char_input_name,
+            context_input_name=config.context_input_name,
+            target_name=config.target_name,
+            n_classes=len(word_to_context.keys()))
+
+    test_generator = MulticlassGenerator(test_data,
+            non_word_generator,
+            non_word_input_transformer,
+            context_input_transformer,
+            label_encoder,
+            non_word_char_input_name=config.non_word_char_input_name,
+            context_input_name=config.context_input_name,
+            target_name=config.target_name,
+            n_classes=len(word_to_context.keys()))
+
+    return train_generator, valid_generator, test_generator
+
+def build_label_encoder(words):
+    label_encoder = LabelEncoder()
+    label_encoder.fit(words)
+    return label_encoder
+
+"""
+Load the Aspell English vocabulary and use it to initialize the retriever
+that we use to evaluate our model's performance on the validation set.
+We expect the model to surpass the performance of the retriever, as the
+model exploits the context of the error.  The retriever functions, then,
+as a weak baseline.
+"""
+def load_aspell_vocabulary(csv_path='~/proj/spelling/data/aspell-dict.csv.gz'):
+    df = pd.read_csv(csv_path, sep='\t', encoding='utf8')
+    vocabulary = [word for word in df.word.tolist() if "'" not in word and len(word) >= 3 and len(word) <= 7]
+    return vocabulary
+
+retriever_lock = threading.Lock()
+
+def build_retriever(vocabulary=None):
+    if vocabulary is None:
+        vocabulary = load_aspell_vocabulary()
+
+    with retriever_lock:
+        aspell_retriever = spelldict.AspellRetriever()
+        edit_distance_retriever = spelldict.EditDistanceRetriever(vocabulary)
+        retriever = spelldict.RetrieverCollection([aspell_retriever, edit_distance_retriever])
+        retriever = spelldict.CachingRetriever(retriever,
+            cache_dir='/localwork/ndronen/spelling/spelling_error_cache/')
+        jaro_sorter = spelldict.DistanceSorter('jaro_winkler')
+        return spelldict.SortingRetriever(retriever, jaro_sorter)
+
+def prepare_data(config):
+    word_to_context = load_word_to_context(config)
+    vocabulary = build_vocabulary(word_to_context)
+    train_generator, valid_generator, test_generator = \
+            build_generators(word_to_context, vocabulary, config)
+
+    return word_to_context, vocabulary, \
+            train_generator, valid_generator, test_generator
+
+def fit(config):
+    word_to_context, vocabulary, \
+            train_generator, valid_generator, test_generator = \
+                prepare_data(config)
+
+    # We don't know the number of context embeddings in advance, so we
+    # set them at runtime based on the size of the vocabulary.
+    config.n_context_embeddings = len(vocabulary)
+    print('n_context_embeddings %d' % config.n_context_embeddings)
+
+    n_classes = len(word_to_context.keys())
+    print('n_classes %d' % n_classes)
+
+    graph = build_model(config, n_classes)
+
+    config.logger('model has %d parameters' % graph.count_params())
+
+    # Violate encapsulation a bit.
+    label_encoder = train_generator.label_encoder
+    target_map = dict(zip(
+        label_encoder.classes_, range(len(label_encoder.classes_))))
+
+    config.logger('building callbacks')
+
+    callbacks = build_callbacks(config,
+            valid_generator,
+            n_samples=config.n_val_samples,
+            dictionary=build_retriever(),
+            target_map=target_map)
+
+    # Don't use class weights here; the targets are balanced.
+    class_weight = {}
+
+    verbose = 2 if 'background' in config.mode else 1
+
+    graph.fit_generator(train_generator.generate(train=True),
+            samples_per_epoch=config.samples_per_epoch,
+            nb_worker=config.n_worker,
+            nb_epoch=config.n_epoch,
+            validation_data=valid_generator.generate(exhaustive=True),
+            nb_val_samples=config.n_val_samples,
+            callbacks=callbacks,
+            class_weight=class_weight,
+            verbose=verbose)
+
+###########################################################################
+# Callbacks
+###########################################################################
+
 class MetricsCallback(keras.callbacks.Callback):
     def __init__(self, config, generator, n_samples, dictionary, target_map):
         self.__dict__.update(locals())
@@ -157,7 +417,7 @@ class MetricsCallback(keras.callbacks.Callback):
         counter = 0
         pbar = build_progressbar(self.n_samples)
         print('\n')
-        g = self.generator.generate(exhaustive=True, train=False)
+        g = self.generator.generate(exhaustive=False, train=False)
         n_failed = 0
         while True:
             pbar.update(counter)
@@ -203,9 +463,9 @@ class MetricsCallback(keras.callbacks.Callback):
             y_hat.append(np.argmax(pred, axis=1))
 
             counter += len(targets)
-            #if counter >= self.n_samples:
-            #    print('%d >= %d - stopping loop' % (counter, self.n_samples))
-            #    break
+            if counter >= self.n_samples:
+                print('%d >= %d - stopping loop' % (counter, self.n_samples))
+                break
 
         pbar.finish()
 
@@ -223,35 +483,7 @@ class MetricsCallback(keras.callbacks.Callback):
             (accuracy_score(y, y_hat), f1_score(y, y_hat, average='weighted')))
         self.config.logger('\n')
 
-class CurriculumCallback(keras.callbacks.Callback):
-    # TODO: this needs a controller object that encapsulates the update policy.
-    def __init__(self, logger, pool, threshold, frequency, monitor):
-        self.__dict__.update(locals())
-        del self.self
-        self.first_epoch = None
-
-    def on_epoch_end(self, epoch, logs={}):
-        self.logger('epoch %d %s %0.4f' % (
-            epoch, self.monitor, logs[self.monitor]))
-
-        if logs[self.monitor] < self.threshold:
-            self.logger('crossed the %s threshold' % self.monitor)
-            if self.first_epoch is None:
-                self.first_epoch = epoch
-            if (self.first_epoch - epoch) % self.frequency == 0:
-                old_min_length = self.pool.min_length
-                self.pool.min_length -= 1
-                self.logger('changed curriculum pool minimum length from %d to %d\n\n' % (
-                    old_min_length, self.pool.min_length))
-            else:
-                self.logger('left curriculum pool minimum length at %d\n\n' %
-                        self.pool.min_length)
-        else:
-            self.logger('left curriculum pool minimum length at %d\n\n' %
-                    self.pool.min_length)
-
-
-def build_callbacks(config, generator, n_samples, dictionary, target_map, pool):
+def build_callbacks(config, generator, n_samples, dictionary, target_map):
     callbacks = []
     mc = MetricsCallback(config, generator, n_samples, dictionary, target_map)
     wn = DenseWeightNormCallback(config)
@@ -263,144 +495,4 @@ def build_callbacks(config, generator, n_samples, dictionary, target_map, pool):
                 save_best_only=True)
         callbacks.append(cp)
 
-    if pool is not None:
-        cc = CurriculumCallback(config.logger, pool,
-                threshold=config.length_curriculum_change_threshold,
-                frequency=config.length_curriculum_change_frequency,
-                monitor=config.length_curriculum_monitor)
-        callbacks.append(cc)
-
     return callbacks
-
-retriever_lock = threading.Lock()
-
-# Retrievers
-def build_retriever(vocabulary):
-    with retriever_lock:
-        aspell_retriever = spelldict.AspellRetriever()
-        edit_distance_retriever = spelldict.EditDistanceRetriever(vocabulary)
-        retriever = spelldict.RetrieverCollection([aspell_retriever, edit_distance_retriever])
-        retriever = spelldict.CachingRetriever(retriever,
-            cache_dir='/localwork/ndronen/spelling/spelling_error_cache/')
-        jaro_sorter = spelldict.DistanceSorter('jaro_winkler')
-        return spelldict.SortingRetriever(retriever, jaro_sorter)
-
-def fit(config, callbacks=[]):
-    df = pd.read_csv(config.non_word_csv, sep='\t', encoding='utf8')
-    vocabulary = df.real_word.unique().tolist()
-    df = df[df.binary_target == 0]
-
-    # Select examples by frequency and length.
-    frequencies = df.multiclass_correction_target.value_counts().to_dict()
-    df['frequency'] = df.multiclass_correction_target.apply(lambda x: frequencies[x])
-    df['len'] = df.word.apply(len)
-    mask = (df.frequency >= config.min_frequency) & (df.len >= config.min_length) & (df.len <= config.max_length)
-    df = df[mask]
-    print(len(df), len(df.multiclass_correction_target.unique()))
-    print('word frequencies %d %d' % (df.frequency.min(), df.frequency.max()))
-    print('word lengths %d %d' % (df.len.min(), df.len.max()))
-    print(df.sort_values('len').head(1).word)
-
-    le = LabelEncoder()
-    le.fit(df.real_word)
-
-    df_train, df_other = train_test_split(df, train_size=0.8, random_state=config.seed)
-    train_words = set(df_train.word)
-    other_words = set(df_other.word)
-    leaked_words = train_words.intersection(other_words)
-    df_other = df_other[~df_other.word.isin(leaked_words)]
-    df_valid, df_test = train_test_split(df_other, train_size=0.5, random_state=config.seed)
-
-    print('train %d validation %d test %d' % (len(df_train), len(df_valid), len(df_test)))
-
-    train_targets = le.transform(df_train.real_word).tolist()
-    noise_word_target = max(train_targets) + 1
-    n_classes = noise_word_target + 1
-
-    target_map = dict(zip(df_train.real_word, train_targets))
-    for word in vocabulary:
-        if word not in target_map:
-            target_map[word] = noise_word_target
-
-    pool = None 
-
-    if config.use_length_curriculum:
-        pool = LengthIndexedPool(
-            df_train.word.tolist(),
-            df_train.real_word.tolist(),
-            train_targets,
-            min_length=config.initial_min_length,
-            max_length=config.initial_max_length)
-
-        train_data = ScheduledMulticlassModelDatasetGenerator(pool,
-                 model_input_width=config.model_input_width,
-                 n_classes=n_classes,
-                 batch_size=config.batch_size)
-    elif config.use_contrasting_cases:
-        train_data = MulticlassModelDatasetGenerator(
-            df_train.word.tolist(),
-            df_train.real_word.tolist(),
-            train_targets,
-            config.model_input_width,
-            n_classes,
-            batch_size=config.batch_size,
-            noise_word_target=noise_word_target,
-            retriever=build_retriever(vocabulary))
-    else:
-        train_data = MulticlassModelDatasetGenerator(
-            df_train.word.tolist(),
-            df_train.real_word.tolist(),
-            train_targets,
-            config.model_input_width,
-            n_classes,
-            batch_size=config.batch_size,
-            use_correct_word_as_non_word_example=config.use_correct_word_as_non_word_example)
-
-    # Don't configure the validation data set to make noise examples.
-    validation_data = MulticlassModelDatasetGenerator(
-        # non_words
-        df_valid.head(config.n_val_samples).word.tolist(),
-        # corrections
-        df_valid.head(config.n_val_samples).real_word.tolist(),
-        # targets
-        le.transform(df_valid.head(config.n_val_samples).real_word.tolist()),
-        # model_input_width
-        config.model_input_width,
-        n_classes,
-        batch_size=config.batch_size)
-    
-    class_weight_targets = train_targets
-    if config.use_contrasting_cases:
-        # Add one noise example for every real example.
-        class_weight_targets += [noise_word_target] * len(train_targets)
-    class_weight = modeling.utils.balanced_class_weights(
-        class_weight_targets,
-        n_classes,
-        class_weight_exponent=config.class_weight_exponent)
-    if not config.use_contrasting_cases:
-        class_weight[noise_word_target] = 0
-
-    print('n_classes %d' % n_classes)
-
-    graph = build_model(config, n_classes)
-
-    config.logger('model has %d parameters' % graph.count_params())
-
-    callbacks = build_callbacks(config,
-            validation_data,
-            n_samples=config.n_val_samples,
-            dictionary=build_retriever(vocabulary),
-            target_map=target_map,
-            pool=pool)
-
-    verbose = 2 if 'background' in config.mode else 1
-
-    graph.fit_generator(train_data.generate(train=True),
-            samples_per_epoch=config.samples_per_epoch,
-            nb_worker=config.n_worker,
-            nb_epoch=config.n_epoch,
-            validation_data=validation_data.generate(),
-            nb_val_samples=config.n_val_samples,
-            callbacks=callbacks,
-            class_weight=class_weight,
-            verbose=verbose)

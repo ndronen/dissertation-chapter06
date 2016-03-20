@@ -1,28 +1,33 @@
 {
     "description": "multiclass classification model that predicts the true correction for a spelling error given the error and its context",
-    "non_word_input_name": "non_word_input",
+    "non_word_char_input_name": "non_word_char_input",
     "context_input_name": "context_input",
     "target_name": "multiclass_correction_target",
+    "non_word_generator": "LearnedEditTransformer",
+    "min_edits": 1,
+    "max_edits": 1,
 
-    "model_non_word_input_width": 28,
-    "model_context_input_width": 5,
+    "non_word_char_input_width": 13,
+    "context_input_width": 5,
 
-    "data_path": "data/contexts-100-words-1000-contexts-per-word.pkl",
+    "pickle_path": "data/contexts-500-words-500-contexts-per-word.pkl",
     "min_frequency": 50,
     "min_length": 6,
     "max_length": 25,
 
-    "n_non_word_embed_dims": 10,
-    "n_non_word_embeddings": 255,
-    "n_non_word_filters": 100,
-    "non_word_filter_width": 6,
+    "pool_merge_mode": "concat",
 
-    "n_context_embed_dims": 100,
-    "n_context_embeddings": 0,
-    "n_context_filters": 100,
+    "n_char_embed_dims": 10,
+    "n_char_embeddings": 255,
+    "n_char_filters": 1000,
+    "char_filter_width": 9,
+
+    "n_context_embed_dims": 50,
+    "n_context_embeddings": null,
+    "n_context_filters": 1000,
     "context_filter_width": 5,
 
-    "fully_connected": [],
+    "fully_connected": [1000,1000],
     "n_residual_blocks": 0,
     "n_hidden_residual": 0,
 
@@ -31,7 +36,7 @@
     "embedding_init": "uniform",
     "batch_normalization": false,
 
-    "optimizer": "Adam",
+    "optimizer": "Adagrad",
     "clipnorm": 0,
     "loss": "categorical_crossentropy",
 
@@ -41,13 +46,13 @@
     "gaussian_noise_sd": 0.0,
 
     "class_weight_exponent": 1,
-    "patience": 100,
+    "patience": 200,
     "n_epoch": 10000,
     "batch_size": 32,
-    "seed": 17,
-    "samples_per_epoch": 10000,
-    "n_worker": 128,
-    "n_val_samples": 2000,
+    "random_state": 17,
+    "samples_per_epoch": 1000,
+    "n_worker": 10,
+    "n_val_samples": 1000,
 
     "embedding_max_norm": 1000,
     "filter_max_norm": 1000,
