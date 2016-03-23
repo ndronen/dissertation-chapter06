@@ -61,16 +61,6 @@ class Identity(Layer):
     def get_output(self, train):
         return T.cast(self.get_input(train), floatx())
 
-class ScaleAndShift(Layer):
-    def __init__(self, scale, shift, **kwargs):
-        super(ScaleAndShift, self).__init__(**kwargs)
-        self.scale = scale
-        self.shift = shift
-
-    def get_output(self, train):
-        return T.cast(self.scale * self.get_input(train) - self.shift,
-                dtype=floatx())
-
 class TakeMiddleWordEmbedding(Layer):
     def __init__(self, input_width):
         super(TakeMiddleWordEmbedding, self).__init__()
@@ -121,55 +111,48 @@ def build_char_model(graph, config):
             name='char_embedding',
             inputs=[config.non_word_char_input_name,
                 config.real_word_char_input_name],
-            outputs=['non_word_char_embedding',
-                'real_word_char_embedding'])
+            outputs=['non_word_char_embed',
+                'real_word_char_embed'])
 
     graph.add_node(
         GaussianNoise(config.gaussian_noise_sd),
-        name='non_word_char_embedding_noise',
-        input='non_word_char_embedding')
+        name='non_word_char_embed_noise',
+        input='non_word_char_embed')
 
     char_conv_layer = build_convolutional_layer(config,
             n_filters=config.n_char_filters,
             filter_width=config.char_filter_width)
+
+    inputs = ['non_word_char_embed_noise', 'real_word_char_embed']
+    outputs = [re.sub('_embed.*', '_conv', s) for s in inputs]
     graph.add_shared_node(char_conv_layer,
-            name='char_conv',
-            inputs=['non_word_char_embedding_noise',
-                'real_word_char_embedding'],
-            outputs=['non_word_char_conv',
-                'real_word_char_conv'])
+            name='char_conv', inputs=inputs, outputs=outputs)
 
     non_word_char_prev = 'non_word_char_conv'
     real_word_char_prev = 'real_word_char_conv'
 
     if config.batch_normalization:
         char_conv_bn = BatchNormalization()
+        inputs = [non_word_char_prev, real_word_char_prev]
+        outputs = [_+'_bn' for _ in inputs]
         graph.add_shared_node(char_conv_bn,
                 name='char_conv_bn',
-                inputs=[non_word_char_prev,
-                    real_word_char_prev],
-                outputs=[non_word_char_prev+'_bn',
-                    real_word_char_prev+'_bn'])
-        non_word_char_prev += '_bn'
-        real_word_char_prev += '_bn'
+                inputs=inputs, outputs=outputs)
+        non_word_char_prev = outputs[0]
+        real_word_char_prev = outputs[1]
 
-    graph.add_shared_node(
-            Activation('relu'),
+    graph.add_shared_node(Activation('relu'),
             name='char_conv_act',
-            inputs=[non_word_char_prev,
-                real_word_char_prev],
-            outputs=['non_word_conv_act',
-                'real_word_conv_act'])
+            inputs=[non_word_char_prev, real_word_char_prev],
+            outputs=['non_word_conv_act', 'real_word_conv_act'])
 
     char_pool = build_pooling_layer(config,
             input_width=config.char_input_width,
             filter_width=config.char_filter_width)
     graph.add_shared_node(char_pool,
             name='char_pool',
-            inputs=['non_word_conv_act',
-                'real_word_conv_act'],
-            outputs=['non_word_conv_pool',
-                'real_word_conv_pool'])
+            inputs=['non_word_conv_act', 'real_word_conv_act'],
+            outputs=['non_word_conv_pool', 'real_word_conv_pool'])
 
     graph.add_shared_node(Flatten(),
             name='char_flatten',
@@ -183,8 +166,9 @@ def build_char_model(graph, config):
     else:
         dot_axes = -1
 
-    #        Identity(),
-    graph.add_node(Dense(config.char_merge_n_hidden),
+    char_merge_layer = Dense(config.char_merge_n_hidden,
+            W_constraint=maxnorm(config.char_merge_max_norm))
+    graph.add_node(char_merge_layer,
             name='char_merge',
             inputs=['non_word_flatten',
                 'real_word_flatten'],
@@ -228,67 +212,8 @@ def build_flat_context_model(config, n_classes):
     #######################################################################
     # Character layers
     #######################################################################
-
-    # Character-level input for the non-word error.
-    #graph.add_input(config.non_word_char_input_name,
-    #        input_shape=(config.char_input_width,), dtype='int')
-    # Character-level input for the real word suggestion.
-    #graph.add_input(config.real_word_char_input_name,
-    #        input_shape=(config.char_input_width,), dtype='int')
-
-    #,char_model = build_char_model(graph, config)
-
     non_word_output, char_merge_output = build_char_model(
             graph, config)
-
-    #graph.add_node(char_model, 
-    #        name='char_model',
-    #        inputs=[config.non_word_char_input_name,
-    #            config.real_word_char_input_name])
-
-    """
-    graph.add_shared_node(char_model,
-            name='char_model',
-            inputs=[
-                config.non_word_char_input_name,
-                config.real_word_char_input_name],
-            outputs=[
-                'non_word_char_model',
-                'real_word_char_model'])
-
-    if config.char_merge_mode in ['cos', 'dot']:
-        char_dot_axes = ([1], [1])
-    else:
-        char_dot_axes = -1
-
-    graph.add_node(
-        Identity(),
-        name='char_merge',
-        inputs=['non_word_char_model', 'real_word_char_model'],
-        merge_mode=config.char_merge_mode,
-        dot_axes=char_dot_axes)
-    char_merge_prev = 'char_merge'
-
-    if config.char_merge_act == "sigmoid":
-        lambda_layer = Lambda(lambda x: 12.*x-6.)
-    elif config.char_merge_act == "tanh":
-        lambda_layer = Lambda(lambda x: 6.*x-3.)
-    else:
-        lambda_layer = Lambda(lambda x: x)
-    graph.add_node(lambda_layer,
-            name='char_merge_scale', input='char_merge')
-    char_merge_prev = 'char_merge_scale'
-    """
-
-    """
-    Batch normalization at this point triggers a bug in Theano 
-    and probably isn't even necessary here.
-    """
-
-    """
-    graph.add_node(Activation(config.char_merge_act),
-            name='char_merge_act', input=char_merge_prev)
-    """
 
     #######################################################################
     # Word layers
