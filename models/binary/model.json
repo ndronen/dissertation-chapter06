@@ -4,19 +4,24 @@
     "real_word_char_input_name": "real_word_char_input",
     "real_word_input_name": "real_word_input",
     "context_input_name": "context_input",
+    "model_type": "flat_context",
     "target_name": "binary_correction_target",
     "non_word_generator": "LearnedEditTransformer",
     "min_edits": 1,
     "max_edits": 1,
 
-    "pickle_path": "data/contexts-500-words-500-contexts-per-word.pkl",
+    "n_random_train_candidates": 0,
+    "max_train_candidates": 0,
+    "n_train_neighbors": 10,
+
+    "pickle_path": "data/contexts-100-min-100-max-per-word.pkl",
     "min_frequency": 50,
     "min_length": 6,
     "max_length": 25,
 
     "merge_mode": "concat",
 
-    "char_input_width": 18,
+    "char_input_width": 26,
     "n_char_embed_dims": 10,
     "n_char_embeddings": 255,
     "n_char_filters": 1000,
@@ -77,5 +82,6 @@
     "softmax_max_norm": 10,
     "l2_penalty": 0.0,
     "border_mode": "valid",
-    "dense_init": "glorot_uniform"
+    "dense_init": "glorot_uniform",
+    "residual_init": "glorot_uniform"
 }

@@ -11,13 +11,16 @@ from chapter06.dataset import (
         MulticlassNonwordTransformer,
         MulticlassContextTransformer,
         RandomWordTransformer,
-        LearnedEditTransformer)
+        LearnedEditTransformer,
+        DigitFilter)
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.cross_validation import train_test_split
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.utils import check_random_state
+from sklearn.neighbors import NearestNeighbors
+from keras.constraints import maxnorm
 
 from spelling.edits import Editor
 from spelling.utils import build_progressbar
@@ -37,11 +40,13 @@ import pandas as pd
 
 from keras.models import Sequential, Graph
 from keras.utils import np_utils
-from keras.layers.core import Dense, Dropout, Activation, Flatten, Layer, Lambda, Reshape
-from keras.constraints import maxnorm
+from keras.layers.core import Dense, Dropout, Activation, Flatten, Layer, Lambda, Reshape, Merge
 from keras.layers.noise import GaussianNoise
 from keras.layers.normalization import BatchNormalization
 import keras.callbacks
+
+from keras.backend import floatx
+import theano.tensor as T
 
 import modeling.data
 from modeling.builders import (build_embedding_layer,
@@ -54,7 +59,7 @@ import spelling.dictionary as spelldict
 
 class Identity(Layer):
     def get_output(self, train):
-        return self.get_input(train)
+        return T.cast(self.get_input(train), floatx())
 
 class TakeMiddleWordEmbedding(Layer):
     def __init__(self, input_width):
@@ -83,7 +88,36 @@ def add_bn_relu(graph, config, prev_layer):
     graph.add_node(Activation('relu'), name=relu_name, input=prev_layer)
     return relu_name
 
+def build_char_model(config):
+    char_model = Sequential()
+    char_model.add(build_embedding_layer(config,
+            input_width=config.char_input_width,
+            n_embeddings=config.n_char_embeddings,
+            n_embed_dims=config.n_char_embed_dims,
+            dropout=config.dropout_embedding_p))
+    if config.batch_normalization:
+        char_model.add(BatchNormalization())
+    char_model.add(build_convolutional_layer(config,
+            n_filters=config.n_char_filters,
+            filter_width=config.char_filter_width))
+    if config.batch_normalization:
+        char_model.add(BatchNormalization())
+    char_model.add(Activation('relu'))
+    char_model.add(build_pooling_layer(config,
+            input_width=config.char_input_width,
+            filter_width=config.char_filter_width))
+    char_model.add(Flatten())
+    return char_model
+
 def build_model(config, n_classes):
+    if config.model_type == 'convolutional_context':
+        return build_convolutional_context_model(config, n_classes)
+    elif config.model_type == 'flat_context':
+        return build_flat_context_model(config, n_classes)
+    else:
+        raise ValueError('unknown model type %s' % config.model_type)
+
+def build_flat_context_model(config, n_classes):
     np.random.seed(config.random_state)
 
     graph = Graph()
@@ -99,22 +133,186 @@ def build_model(config, n_classes):
     graph.add_input(config.real_word_char_input_name,
             input_shape=(config.char_input_width,), dtype='int')
 
-    char_model = Sequential()
-    char_model.add(build_embedding_layer(config,
-            input_width=config.char_input_width,
-            n_embeddings=config.n_char_embeddings,
-            n_embed_dims=config.n_char_embed_dims))
-    char_model.add(build_convolutional_layer(config,
-            n_filters=config.n_char_filters,
-            filter_width=config.char_filter_width))
-    if config.batch_normalization:
-        char_model.add(BatchNormalization())
-    char_model.add(Activation('relu'))
-    char_model.add(build_pooling_layer(config,
-            input_width=config.char_input_width,
-            filter_width=config.char_filter_width))
-    char_model.add(Flatten())
+    char_model = build_char_model(config)
+    graph.add_shared_node(char_model,
+            name='char_model',
+            inputs=[
+                config.non_word_char_input_name,
+                config.real_word_char_input_name],
+            outputs=[
+                'non_word_char_model',
+                'real_word_char_model'])
 
+    if config.char_merge_mode in ['cos', 'dot']:
+        char_dot_axes = ([1], [1])
+    else:
+        char_dot_axes = -1
+
+    graph.add_node(Identity(), name='char_merge',
+        inputs=['non_word_char_model', 'real_word_char_model'],
+        merge_mode=config.char_merge_mode,
+        dot_axes=char_dot_axes)
+
+    if config.char_merge_act == "sigmoid":
+        lambda_layer = Lambda(lambda x: 12.*x-6.)
+    elif config.char_merge_act == "tanh":
+        lambda_layer = Lambda(lambda x: 6.*x-3.)
+    else:
+        lambda_layer = Lambda(lambda x: x)
+
+    graph.add_node(lambda_layer,
+            name='char_merge_scale', input='char_merge')
+    char_merge_prev = 'char_merge'
+    if config.batch_normalization:
+        graph.add_node(BatchNormalization(),
+                name='char_merge_bn', input='char_merge')
+        char_merge_prev = 'char_merge_bn'
+    graph.add_node(Activation(config.char_merge_act),
+            name='char_merge_act', input=char_merge_prev)
+
+    #######################################################################
+    # Word layers
+    #######################################################################
+
+    # Word-level input for the context of the non-word error.
+    context_embedding_inputs = []
+    context_embedding_outputs = []
+    context_reshape_outputs = []
+    for i in range(1, 6):
+        name = '%s_%02d' % (config.context_input_name, i)
+        graph.add_input(name, input_shape=(1,), dtype='int')
+        context_embedding_inputs.append(name)
+        context_embedding_outputs.append(
+                'context_embedding_%02d' % i)
+        context_reshape_outputs.append(
+                'context_reshape_%02d' % i)
+
+    context_embedding = build_embedding_layer(config,
+            input_width=1,
+            n_embeddings=config.n_context_embeddings,
+            n_embed_dims=config.n_context_embed_dims,
+            dropout=config.dropout_embedding_p)
+
+    graph.add_shared_node(context_embedding,
+            name='context_embedding',
+            inputs=context_embedding_inputs,
+            outputs=context_embedding_outputs)
+
+    graph.add_shared_node(Reshape((config.n_context_embed_dims,)),
+        name='context_reshape',
+        inputs=context_embedding_outputs,
+        outputs=context_reshape_outputs)
+
+    graph.add_node(Identity(),
+            name='word_context',
+            inputs=context_reshape_outputs,
+            merge_mode='concat')
+
+    # Add some number of fully-connected layers without skip connections.
+    prev_layer = None
+    for i,n_hidden in enumerate(config.fully_connected):
+        layer_name = 'dense%02d' %i
+        l = build_dense_layer(config, n_hidden=n_hidden)
+        if i == 0:
+            inputs = ['word_context', 'non_word_char_model']
+            graph.add_node(l, name=layer_name,
+                    inputs=inputs,
+                    merge_mode='concat')
+        else:
+            graph.add_node(l, name=layer_name, input=prev_layer)
+        prev_layer = layer_name
+        if config.batch_normalization:
+            graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
+            prev_layer = layer_name+'bn'
+        graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
+        prev_layer = layer_name+'relu'
+        if config.dropout_fc_p > 0.:
+            graph.add_node(Dropout(config.dropout_fc_p), name=layer_name+'do', input=prev_layer)
+            prev_layer = layer_name+'do'
+
+    # Add sequence of residual blocks.
+    for i in range(config.n_residual_blocks):
+        # Add a fixed number of layers per residual block.
+        block_name = '%02d' % i
+
+        graph.add_node(Identity(), name=block_name+'input', input=prev_layer)
+        prev_layer = block_input_layer = block_name+'input'
+
+        try:
+            n_layers_per_residual_block = config.n_layers_per_residual_block
+        except AttributeError:
+            n_layers_per_residual_block = 2
+
+        for layer_num in range(n_layers_per_residual_block):
+            layer_name = 'h%s%02d' % (block_name, layer_num)
+    
+            l = Dense(config.n_hidden_residual, init=config.residual_init,
+                    W_constraint=maxnorm(config.residual_max_norm))
+            graph.add_node(l, name=layer_name, input=prev_layer)
+            prev_layer = layer_name
+    
+            if config.batch_normalization:
+                graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
+                prev_layer = layer_name+'bn'
+    
+            if i < n_layers_per_residual_block:
+                graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
+                prev_layer = layer_name+'relu'
+                if config.dropout_fc_p > 0.:
+                    graph.add_node(Dropout(config.dropout_residual_p), name=layer_name+'do', input=prev_layer)
+                    prev_layer = layer_name+'do'
+
+        graph.add_node(Identity(), name=block_name+'output', inputs=[block_input_layer, prev_layer], merge_mode='sum')
+        graph.add_node(Activation('relu'), name=block_name+'relu', input=block_name+'output')
+        prev_layer = block_input_layer = block_name+'relu'
+
+    softmax_inputs = ['char_merge_act']
+    if prev_layer is None:
+        softmax_inputs.append('word_context')
+        graph.add_node(Dense(n_classes, init=config.dense_init,
+            W_constraint=maxnorm(config.softmax_max_norm)),
+            name='softmax',
+            inputs=softmax_inputs,
+            merge_mode=config.merge_mode,
+            dot_axes=dot_axes)
+    else:
+        softmax_inputs.append(prev_layer)
+        graph.add_node(Dense(n_classes, init=config.dense_init,
+            W_constraint=maxnorm(config.softmax_max_norm)),
+            name='softmax',
+            inputs=softmax_inputs)
+    prev_layer = 'softmax'
+    if config.batch_normalization:
+        graph.add_node(BatchNormalization(), name='softmax_bn', input='softmax')
+        prev_layer = 'softmax_bn'
+    graph.add_node(Activation('softmax'), name='softmax_activation', input=prev_layer)
+    graph.add_output(name='binary_correction_target', input='softmax_activation')
+
+    load_weights(config, graph)
+
+    optimizer = build_optimizer(config)
+
+    graph.compile(loss={'binary_correction_target': config.loss}, optimizer=optimizer)
+
+    return graph
+
+def build_convolutional_context_model(config, n_classes):
+    np.random.seed(config.random_state)
+
+    graph = Graph()
+
+    #######################################################################
+    # Character layers
+    #######################################################################
+
+    # Character-level input for the non-word error.
+    graph.add_input(config.non_word_char_input_name,
+            input_shape=(config.char_input_width,), dtype='int')
+    # Character-level input for the real word suggestion.
+    graph.add_input(config.real_word_char_input_name,
+            input_shape=(config.char_input_width,), dtype='int')
+
+    char_model = build_char_model(config)
     graph.add_shared_node(char_model,
             name='char_model',
             inputs=[
@@ -129,20 +327,19 @@ def build_model(config, n_classes):
     else:
         char_dot_axes = -1
 
-    graph.add_node(Dense(config.char_merge_n_hidden),
-            name='char_merge_dense',
+    graph.add_node(Identity(), name='char_merge',
         inputs=['non_word_char_model', 'real_word_char_model'],
         merge_mode=config.char_merge_mode,
         dot_axes=char_dot_axes)
     if config.char_merge_act == "sigmoid":
-        lambda_layer = Lambda(lambda x: 6.0*x)
+        lambda_layer = Lambda(lambda x: (12.*x)-6.)
     elif config.char_merge_act == "tanh":
-        lambda_layer = Lambda(lambda x: 3.0*x)
+        lambda_layer = Lambda(lambda x: (6.*x)-3.)
     else:
         lambda_layer = Lambda(lambda x: x)
     graph.add_node(lambda_layer,
             name='char_merge_scale',
-            input='char_merge_dense')
+            input='char_merge')
     graph.add_node(Activation(config.char_merge_act),
             name='char_merge',
             input='char_merge_scale')
@@ -159,7 +356,8 @@ def build_model(config, n_classes):
     context_embedding = build_embedding_layer(config,
             input_width=config.context_input_width,
             n_embeddings=config.n_context_embeddings,
-            n_embed_dims=config.n_context_embed_dims)
+            n_embed_dims=config.n_context_embed_dims,
+            dropout=dropout_embedding_p)
 
     graph.add_node(context_embedding,
             name='context_embedding',
@@ -249,7 +447,7 @@ def build_model(config, n_classes):
                 graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
                 prev_layer = layer_name+'relu'
                 if config.dropout_fc_p > 0.:
-                    graph.add_node(Dropout(config.dropout_fc_p), name=layer_name+'do', input=prev_layer)
+                    graph.add_node(Dropout(config.dropout_residual_p), name=layer_name+'do', input=prev_layer)
                     prev_layer = layer_name+'do'
 
         graph.add_node(Identity(), name=block_name+'output', inputs=[block_input_layer, prev_layer], merge_mode='sum')
@@ -444,19 +642,39 @@ def build_callbacks(config, generator, n_samples, other_generators={}):
 retriever_lock = threading.Lock()
 
 # Retrievers
-def build_retriever(vocabulary):
+def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neighbors=0):
     with retriever_lock:
-        aspell_retriever = spelldict.AspellRetriever()
-        edit_distance_retriever = spelldict.EditDistanceRetriever(vocabulary)
-        retriever = spelldict.RetrieverCollection([aspell_retriever, edit_distance_retriever])
+        retrievers = []
+        retrievers.append(spelldict.AspellRetriever())
+        retrievers.append(spelldict.EditDistanceRetriever(vocabulary))
+        if n_random_candidates > 0:
+            retrievers.append(spelldict.RandomRetriever(
+                vocabulary, n_random_candidates))
+        if n_neighbors > 0:
+            estimator = NearestNeighbors(metric='hamming', algorithm='auto')
+            retrievers.append(
+                    spelldict.NearestNeighborsRetriever(
+                        vocabulary, estimator))
+
+        retriever = spelldict.RetrieverCollection(retrievers)
         retriever = spelldict.CachingRetriever(retriever,
                 cache_dir='/localwork/ndronen/spelling/spelling_error_cache/')
         jaro_sorter = spelldict.DistanceSorter('jaro_winkler')
-        return spelldict.SortingRetriever(retriever, jaro_sorter)
+        retriever = spelldict.SortingRetriever(retriever, jaro_sorter)
+
+        if max_candidates > 0:
+            retriever = spelldict.TopKRetriever(sorting_retriever, max_candidates)
+
+        return retriever
 
 def fit(config, callbacks=[]):
     loader = MulticlassLoader(pickle_path=config.pickle_path)
     word_to_context = loader.load()
+
+    # Don't use any contexts that contain "digit".
+    filter = DigitFilter()
+    for word,contexts in word_to_context.items():
+        word_to_context[word] = filter.transform(contexts)
 
     # Tokenize the contexts.
     tokenizer = ContextTokenizer()
@@ -534,8 +752,13 @@ def fit(config, callbacks=[]):
             real_word_input_name=config.real_word_input_name,
             context_input_name=config.context_input_name,
             target_name=config.target_name,
-            retriever=build_retriever(vocabulary.keys()),
-            n_classes=n_classes)
+            retriever=build_retriever(
+                list(vocabulary.keys()), 
+                n_random_candidates=config.n_random_train_candidates,
+                max_candidates=config.max_train_candidates,
+                n_neighbors=config.n_train_neighbors),
+            n_classes=n_classes,
+            sample_weight_exponent=config.class_weight_exponent)
 
     valid_generator = BinaryGenerator(valid_data,
             non_word_generator,
@@ -547,8 +770,9 @@ def fit(config, callbacks=[]):
             real_word_input_name=config.real_word_input_name,
             context_input_name=config.context_input_name,
             target_name=config.target_name,
-            retriever=build_retriever(vocabulary.keys()),
-            n_classes=n_classes)
+            retriever=build_retriever(list(vocabulary.keys())),
+            n_classes=n_classes,
+            sample_weight_exponent=config.class_weight_exponent)
 
     test_generator = BinaryGenerator(test_data,
             non_word_generator,
@@ -560,8 +784,9 @@ def fit(config, callbacks=[]):
             real_word_input_name=config.real_word_input_name,
             context_input_name=config.context_input_name,
             target_name=config.target_name,
-            retriever=build_retriever(vocabulary.keys()),
-            n_classes=n_classes)
+            retriever=build_retriever(list(vocabulary.keys())),
+            n_classes=n_classes,
+            sample_weight_exponent=config.class_weight_exponent)
 
     graph = build_model(config, n_classes)
 
