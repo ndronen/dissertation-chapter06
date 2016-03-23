@@ -29,6 +29,7 @@
     "char_merge_mode": "cos",
     "char_merge_n_hidden": 1,
     "char_merge_act": "tanh",
+    "scale_char_merge_output": false,
 
     "context_input_width": 5,
     "n_context_embed_dims": 100,
