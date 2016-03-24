@@ -354,54 +354,8 @@ def build_convolutional_context_model(config, n_classes):
     # Character layers
     #######################################################################
 
-    # Character-level input for the non-word error.
-    graph.add_input(config.non_word_char_input_name,
-            input_shape=(config.char_input_width,), dtype='int')
-    # Character-level input for the real word suggestion.
-    graph.add_input(config.real_word_char_input_name,
-            input_shape=(config.char_input_width,), dtype='int')
-
-    char_model = build_char_model(config)
-    graph.add_shared_node(char_model,
-            name='char_model',
-            inputs=[
-                config.non_word_char_input_name,
-                config.real_word_char_input_name],
-            outputs=[
-                'non_word_char_model',
-                'real_word_char_model'])
-
-    if config.char_merge_mode == 'cos':
-        char_dot_axes = ([1], [1])
-    else:
-        char_dot_axes = -1
-
-    graph.add_node(
-        Dense(config.char_merge_n_hidden),
-        name='char_merge',
-        inputs=['non_word_char_model', 'real_word_char_model'],
-        merge_mode=config.char_merge_mode,
-        dot_axes=char_dot_axes)
-    char_merge_prev = 'char_merge'
-
-    if config.char_merge_act == "sigmoid":
-        lambda_layer = Lambda(lambda x: (12.*x)-6.)
-    elif config.char_merge_act == "tanh":
-        lambda_layer = Lambda(lambda x: (6.*x)-3.)
-    else:
-        lambda_layer = Lambda(lambda x: x)
-    graph.add_node(lambda_layer,
-            name='char_merge_scale', input='char_merge')
-    char_merge_prev = 'char_merge_scale'
-
-    """
-    Batch normalization at this point triggers a bug in Theano 
-    and probably isn't even necessary here.
-    """
-
-    graph.add_node(Activation(config.char_merge_act),
-            name='char_merge_act',
-            input=char_merge_prev)
+    non_word_output, char_merge_output = build_char_model(
+            graph, config)
 
     #######################################################################
     # Word layers
@@ -416,7 +370,7 @@ def build_convolutional_context_model(config, n_classes):
             input_width=config.context_input_width,
             n_embeddings=config.n_context_embeddings,
             n_embed_dims=config.n_context_embed_dims,
-            dropout=dropout_embedding_p)
+            dropout=config.dropout_embedding_p)
 
     graph.add_node(context_embedding,
             name='context_embedding',
@@ -458,7 +412,7 @@ def build_convolutional_context_model(config, n_classes):
         layer_name = 'dense%02d' %i
         l = build_dense_layer(config, n_hidden=n_hidden)
         if i == 0:
-            inputs = ['context_flatten', 'non_word_char_model']
+            inputs = ['context_flatten', non_word_output]
             if config.use_real_word_embedding:
                 inputs.append('real_word_reshape')
             graph.add_node(l, name=layer_name,
@@ -513,7 +467,7 @@ def build_convolutional_context_model(config, n_classes):
         graph.add_node(Activation('relu'), name=block_name+'relu', input=block_name+'output')
         prev_layer = block_input_layer = block_name+'relu'
 
-    softmax_inputs = ['char_merge_act']
+    softmax_inputs = [char_merge_output]
     if prev_layer is None:
         softmax_inputs.append('context_flatten')
         if config.use_real_word_embedding:
