@@ -30,6 +30,7 @@
     "char_merge_n_hidden": 1,
     "char_merge_act": "tanh",
     "scale_char_merge_output": true,
+    "char_merge_max_norm": 1,
 
     "context_input_width": 5,
     "n_context_embed_dims": 100,
