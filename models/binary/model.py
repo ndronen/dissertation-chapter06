@@ -213,8 +213,7 @@ def build_flat_context_model(config, n_classes):
     #######################################################################
     # Character layers
     #######################################################################
-    non_word_output, char_merge_output = build_char_model(
-            graph, config)
+    non_word_output, char_merge_output = build_char_model(graph, config)
 
     #######################################################################
     # Word layers
@@ -817,6 +816,13 @@ def fit(config, callbacks=[]):
 
     #print(next(train_generator.generate(train=True)))
     #print(next(valid_generator.generate(exhaustive=True)))
+
+    for node_name in graph.nodes.keys():
+        node = graph.nodes[node_name]
+        shape = 'NA'
+        if hasattr(node, 'W'):
+            shape = str(node.W.shape.eval())
+        config.logger('%10s: %s' % (node_name, shape))
 
     graph.fit_generator(train_generator.generate(train=True),
             samples_per_epoch=config.samples_per_epoch,
