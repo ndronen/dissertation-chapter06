@@ -1,5 +1,7 @@
 import unittest
+import traceback
 
+import sys
 import os
 import random
 import re
@@ -145,16 +147,15 @@ class MulticlassLoader(Loader):
     def load(self):
         with open(self.pickle_path, "rb") as f:
             data = pickle.load(f)
-            words = None
             words_to_context = None
             if isinstance(data, tuple):
-                words, words_to_context = data
+                _, words_to_context = data
             elif isinstance(data, dict):
                 words_to_context = data
             else:
                 raise ValueError("Expecting %s to be either tuple or dict, not %s" %
                         (self.pickle_path, type(data)))
-            return words, words_to_context
+            return words_to_context
                 
 
 ###########################################################################
@@ -190,6 +191,23 @@ class MulticlassSplitter(Splitter):
             test_data[word] = test_contexts
 
         return train_data, validation_data, test_data
+
+###########################################################################
+# Data set filters
+###########################################################################
+
+class Filter(object):
+    def transform(self, X, y=None):
+        raise NotImplementedError()
+
+class DigitFilter(Filter):
+    def transform(self, X, y=None):
+        kept = []
+        for context in X:
+            if 'digit' in context:
+                continue
+            kept.append(context)
+        return kept
 
 ###########################################################################
 # Data set tokenizers
@@ -285,12 +303,15 @@ class Transformer(object):
         raise NotImplementedError()
 
 class MulticlassContextTransformer(Transformer):
+    NON_WORD = "<NONWORD>"
+    UNKNOWN_WORD = "<UNK>"
+
     """
     Transforms a list of contexts into a matrix of integers.  A context
     is a list of tokens; the tokens are assumed to be preprocessed as
     needed by the application.
     """
-    def __init__(self, vocabulary, output_width, unk_token="<UNK>", unk_index=-1):
+    def __init__(self, vocabulary, output_width, non_word_index=-1):
         self.__dict__.update(locals())
 
     def transform(self, X, y=None):
@@ -298,15 +319,16 @@ class MulticlassContextTransformer(Transformer):
         for i in range(len(X)):
             x = X[i]
             for j,token in enumerate(x):
-                if j == self.unk_index:
-                    transformed[i,j] = self.vocabulary[self.unk_token]
+                if j == self.non_word_index:
+                    transformed[i,j] = self.vocabulary[MulticlassContextTransformer.NON_WORD]
                 else:
                     try:
                         transformed[i,j] = self.vocabulary[token]
                     except KeyError:
+                        # TODO: stop using '<UNK>' to denote the misspelled word.
                         # We use the blank word here instead of <UNK>, because
                         # <UNK> denotes the misspelled word.  (Poor choice of names.)
-                        transformed[i,j] = self.vocabulary['']
+                        transformed[i,j] = self.vocabulary[MulticlassContextTransformer.UNKNOWN_WORD]
         return transformed
 
 class TestMulticlassContextTransformer(unittest.TestCase):
@@ -318,11 +340,11 @@ class TestMulticlassContextTransformer(unittest.TestCase):
                 "a": 3,
                 "test": 4,
                 "case": 5,
-                "<UNK>": 6
+                MulticlassContextTransformer.NON_WORD: 6
                 }
         output_width = 5
         transformer = MulticlassContextTransformer(
-                vocabulary, output_width, unk_index=2)
+                vocabulary, output_width, non_word_index=2)
         X = [["this", "is", "a", "test", "case"]]
         actual = transformer.transform(X)
         expected = [[1, 2, 6, 4, 5]]
@@ -337,7 +359,6 @@ class MulticlassNonwordTransformer(Transformer):
         self.__dict__.update(locals())
 
     def transform(self, X, y=None):
-        assert all([len(x) <= self.output_width for x in X])
         X = [self.mark(word) for word in X]
         return build_char_matrix(X, width=self.output_width, return_mask=False)
 
@@ -353,9 +374,9 @@ class Generator(object):
         raise NotImplementedError()
 
 class MulticlassGenerator(Generator):
-    def __init__(self, word_to_context, non_word_generator, char_input_transformer, context_input_transformer, label_encoder, non_word_char_input_name, context_input_name, target_name, n_classes=None, random_state=17):
+    def __init__(self, word_to_context, non_word_generator, char_input_transformer, context_input_transformer, label_encoder, non_word_char_input_name, context_input_name, target_name, batch_size=1, n_classes=None, random_state=17):
         self.__dict__.update(locals())
-        self.random_state = random.Random(random_state)
+        self.random_state = check_random_state(random_state)
 
     def generate(self, exhaustive=False, train=False):
         if exhaustive:
@@ -366,41 +387,144 @@ class MulticlassGenerator(Generator):
     def generate_exhaustive(self, train=False):
         words = sorted(list(self.word_to_context.keys()))
         pbar = build_pbar(words)
-        for i,word in enumerate(words):
-            pbar.update(i+1)
-            for context in self.word_to_context[word]:
-                yield self.build_next(word, context)
-        pbar.finish()
+        while True:
+            for i,word in enumerate(words):
+                pbar.update(i+1)
+                word_list = []
+                word_list.append(word)
+                for context in self.word_to_context[word]:
+                    context_list = []
+                    context_list.append(context)
+                    try:
+                        yield self.build_next(word_list, context_list)
+                    except ValueError as e:
+                        if str(e) == "no contexts found":
+                            continue
+                        raise e
+                    except Exception as e:
+                        print('generate_exhaustive', word_list, context_list, e, type(e))
+                        print('')
+                        (t, v, tb) = sys.exc_info()
+                        traceback.print_tb(tb)
+                        print('')
+            pbar.finish()
 
     def generate_infinite(self, train=False):
-        words = sorted(list(self.word_to_context.keys()))
+        words = np.array(list(self.word_to_context.keys()))
         while True:
-            for word in words:
-                contexts = self.word_to_context[word]
-                try:
-                    context = self.random_state.choice(contexts)
-                except IndexError:
+            word_sample = self.random_state.choice(words,
+                    size=self.batch_size)
+            try:
+                yield self.build_next(word_sample)
+            except ValueError as e:
+                if str(e) == "no contexts found":
                     continue
+                raise e
+            except Exception as e:
+                print('generate_infinite', word_sample, e, type(e))
+                print('')
+                (t, v, tb) = sys.exc_info()
+                traceback.print_tb(tb)
+                print('')
 
-                yield self.build_next(word, context)
+    def build_next(self, words, ctx=None):
+        non_words = []
+        non_word_inputs = []
+        contexts = []
+        context_inputs = []
+        context_inputs_01 = []
+        context_inputs_02 = []
+        context_inputs_03 = []
+        context_inputs_04 = []
+        context_inputs_05 = []
+        targets = []
 
-    def build_next(self, word, context):
-        non_word = self.non_word_generator.transform([word])
-        non_word_input = self.char_input_transformer.transform(non_word)
-        context_input = self.context_input_transformer.transform([context])
-        target = self.label_encoder.transform(word)
-        if self.n_classes is not None:
-            target = np_utils.to_categorical([target], self.n_classes)
+        kept_words = []
+
+        for i,word in enumerate(words):
+            if ctx is None:
+                ctxs = self.word_to_context[word]
+                if len(ctxs) == 0:
+                    continue
+                j = self.random_state.choice(len(ctxs))
+                context = ctxs[j]
+            else:
+                context = ctx[i]
+
+            kept_words.append(word)
+
+            non_word = self.non_word_generator.transform([word])
+            non_word_input = self.char_input_transformer.transform(non_word)
+            context_input = self.context_input_transformer.transform([context])
+
+            context_input_01 = []
+            context_input_02 = []
+            context_input_03 = []
+            context_input_04 = []
+            context_input_05 = []
+    
+            for i,ctx_input in enumerate(context_input):
+                context_input_01.append([ctx_input[0]])
+                context_input_02.append([ctx_input[1]])
+                context_input_03.append([ctx_input[2]])
+                context_input_04.append([ctx_input[3]])
+                context_input_05.append([ctx_input[4]])
+
+            target = self.label_encoder.transform(word)
+            if self.n_classes is not None:
+                target = np_utils.to_categorical([target], self.n_classes)
+
+            non_words.append(non_word)
+            non_word_inputs.append(non_word_input)
+            contexts.append(np.array(context))
+            context_inputs.append(context_input)
+            context_inputs_01.append(context_input_01)
+            context_inputs_02.append(context_input_02)
+            context_inputs_03.append(context_input_03)
+            context_inputs_04.append(context_input_04)
+            context_inputs_05.append(context_input_05)
+            targets.append(target)
+
+        if len(kept_words) == 0:
+            raise ValueError("no contexts found")
+
+        non_words = np.array(non_words)
+        non_word_inputs = np.concatenate(non_word_inputs)
+        #print("contexts", contexts)
+        #contexts = np.concatenate(contexts, axis=1)
+        #print("contexts", contexts)
+        context_inputs = np.concatenate(context_inputs)
+        context_inputs_01 = np.concatenate(context_inputs_01)
+        context_inputs_02 = np.concatenate(context_inputs_02)
+        context_inputs_03 = np.concatenate(context_inputs_03)
+        context_inputs_04 = np.concatenate(context_inputs_04)
+        context_inputs_05 = np.concatenate(context_inputs_05)
+        targets = np.concatenate(targets)
+
+        #print('words', len(words))
+        #print('non_words', non_words.shape)
+        #print('contexts', contexts.shape)
+        #print('context_inputs', context_inputs.shape)
+        #print('context_inputs_01', context_inputs_01.shape)
+        #print('context_inputs_02', context_inputs_02.shape)
+        #print('context_inputs_03', context_inputs_03.shape)
+        #print('context_inputs_04', context_inputs_04.shape)
+        #print('context_inputs_05', context_inputs_05.shape)
+        #print('targets', targets.shape)
+
         return {
-                'correct_word': np.array([word]),
-                'non_word': np.array(non_word),
-                'context': np.array([context]),
-                self.non_word_char_input_name: non_word_input,
-                self.context_input_name: context_input,
-                self.target_name: target
+                'correct_word': np.array(kept_words),
+                'non_word': non_words,
+                #'context': contexts,
+                self.non_word_char_input_name: non_word_inputs,
+                self.context_input_name: context_inputs,
+                '%s_%02d' % (self.context_input_name,1): context_inputs_01,
+                '%s_%02d' % (self.context_input_name,2): context_inputs_02,
+                '%s_%02d' % (self.context_input_name,3): context_inputs_03,
+                '%s_%02d' % (self.context_input_name,4): context_inputs_04,
+                '%s_%02d' % (self.context_input_name,5): context_inputs_05,
+                self.target_name: targets
                 }
-
-
 
 class BinaryGenerator(Generator):
     def __init__(self, word_to_context, non_word_generator, char_input_transformer, real_word_input_transformer, context_input_transformer, non_word_char_input_name, real_word_char_input_name, real_word_input_name, context_input_name, target_name, retriever, n_classes=None, sample_weight_exponent=1, random_state=17):
@@ -409,6 +533,7 @@ class BinaryGenerator(Generator):
 
     def generate(self, exhaustive=False, train=False):
         words = sorted(list(self.word_to_context.keys()))
+        self.random_state.shuffle(words)
         while True:
             for word in words:
                 # Sample a context, and replace the center word with each candidate.
@@ -417,9 +542,15 @@ class BinaryGenerator(Generator):
                     context = self.random_state.choice(contexts)
                 except IndexError:
                     continue
+
                 non_word = self.non_word_generator.transform([word])
                 candidates = self.retriever[non_word[0]]
+                # This ensures that there's always an example in a mini-batch
+                # with target 1.  
+                if word not in candidates:
+                    candidates.append(word)
 
+                # TODO: remove candidates that are too long.
                 non_word_char_input = self.char_input_transformer.transform(
                         non_word * len(candidates))
                 real_word_char_input = self.char_input_transformer.transform(
@@ -427,11 +558,17 @@ class BinaryGenerator(Generator):
 
                 targets = []
                 modified_contexts = []
+
                 for candidate in candidates:
                     targets.append(1 if candidate == word else 0)
                     candidate_context = list(context)
                     candidate_context[int(len(candidate_context)/2)] = candidate
                     modified_contexts.append(candidate_context)
+
+                if all([t == 0 for t in targets]):
+                    print('the correct word for "%s=>%s" is not in the candidate list' % (non_word, word),
+                            file=sys.stderr)
+
                 context_input = self.context_input_transformer.transform(
                         modified_contexts)
 

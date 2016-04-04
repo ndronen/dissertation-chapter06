@@ -10,7 +10,7 @@
     "non_word_char_input_width": 13,
     "context_input_width": 5,
 
-    "pickle_path": "data/contexts-500-words-500-contexts-per-word.pkl",
+    "pickle_path": "data/contexts-100-min-100-max-per-word.pkl",
     "min_frequency": 50,
     "min_length": 6,
     "max_length": 25,
@@ -46,13 +46,16 @@
     "gaussian_noise_sd": 0.0,
 
     "class_weight_exponent": 1,
-    "patience": 200,
-    "n_epoch": 10000,
-    "batch_size": 32,
+    "patience": 100,
+    "n_epoch": 1000,
+    "train_batch_size": 32,
+    "valid_batch_size": 8,
+    "test_batch_size": 8,
     "random_state": 17,
-    "samples_per_epoch": 1000,
+    "samples_per_epoch": 10000,
     "n_worker": 10,
     "n_val_samples": 1000,
+    "n_val_callback_samples": 100,
 
     "embedding_max_norm": 1000,
     "filter_max_norm": 1000,
@@ -61,5 +64,7 @@
     "softmax_max_norm": 10,
     "l2_penalty": 0.0,
     "border_mode": "valid",
-    "dense_init": "glorot_uniform"
+    "dense_init": "glorot_uniform",
+    "softmax_init": "glorot_uniform",
+    "residual_init": "glorot_uniform"
 }

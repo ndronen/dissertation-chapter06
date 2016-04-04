@@ -167,8 +167,12 @@ def build_char_model(graph, config):
     else:
         dot_axes = -1
 
+    char_merge_weight = np.array([[1.]])
+    char_merge_bias = np.zeros((1,))
     char_merge_layer = Dense(config.char_merge_n_hidden,
-            W_constraint=maxnorm(config.char_merge_max_norm))
+            W_constraint=maxnorm(config.char_merge_max_norm),
+            weights=[char_merge_weight, char_merge_bias],
+            trainable=config.train_char_merge_layer)
     graph.add_node(char_merge_layer,
             name='char_merge',
             inputs=['non_word_flatten',
@@ -257,7 +261,8 @@ def build_flat_context_model(config, n_classes):
     prev_layer = None
     for i,n_hidden in enumerate(config.fully_connected):
         layer_name = 'dense%02d' %i
-        l = build_dense_layer(config, n_hidden=n_hidden)
+        l = build_dense_layer(config, n_hidden=n_hidden,
+                max_norm=config.dense_max_norm)
         if i == 0:
             inputs = ['word_context', non_word_output]
             graph.add_node(l, name=layer_name,
@@ -409,7 +414,8 @@ def build_convolutional_context_model(config, n_classes):
     prev_layer = None
     for i,n_hidden in enumerate(config.fully_connected):
         layer_name = 'dense%02d' %i
-        l = build_dense_layer(config, n_hidden=n_hidden)
+        l = build_dense_layer(config, n_hidden=n_hidden,
+                max_norm=config.dense_max_norm)
         if i == 0:
             inputs = ['context_flatten', non_word_output]
             if config.use_real_word_embedding:
@@ -669,24 +675,33 @@ def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neigh
                         vocabulary, estimator))
 
         retriever = spelldict.RetrieverCollection(retrievers)
-        retriever = spelldict.CachingRetriever(retriever,
-                cache_dir='/localwork/ndronen/spelling/spelling_error_cache/')
         jaro_sorter = spelldict.DistanceSorter('jaro_winkler')
         retriever = spelldict.SortingRetriever(retriever, jaro_sorter)
-
+        retriever = spelldict.CachingRetriever(retriever,
+                cache_dir='/localwork/ndronen/spelling/spelling_error_cache/multiclass/')
         if max_candidates > 0:
-            retriever = spelldict.TopKRetriever(sorting_retriever, max_candidates)
-
+            retriever = spelldict.TopKRetriever(retriever, max_candidates)
         return retriever
+
+def count_contexts(contexts):
+    return sum([len(c) for c in contexts.values()])
 
 def fit(config, callbacks=[]):
     loader = MulticlassLoader(pickle_path=config.pickle_path)
     word_to_context = loader.load()
 
-    # Don't use any contexts that contain "digit".
+    config.logger('%d contexts before digit filtering' %
+            count_contexts(word_to_context))
+
+    # Drop any contexts that contain 'digit'.
+    # TODO: possibly eliminate this step; it may not be necessary now
+    # that we're using a non-default min_df argument to CountVectorizer.
     filter = DigitFilter()
     for word,contexts in word_to_context.items():
         word_to_context[word] = filter.transform(contexts)
+
+    config.logger('%d contexts after digit filtering' %
+            count_contexts(word_to_context))
 
     # Tokenize the contexts.
     tokenizer = ContextTokenizer()
@@ -698,18 +713,21 @@ def fit(config, callbacks=[]):
     for word,contexts in word_to_context.items():
         word_to_context[word] = windower.transform(contexts, [word] * len(contexts))
 
-    # Fit the vocabulary over all the contexts.
+    # Fit the vocabulary over all the contexts.  For a word in any
+    # context to be included in the vocabulary, it must occur at least
+    # `min_df` times in the corpus of contexts.
     all_contexts = []
     for word,contexts in word_to_context.items():
         all_contexts.append(word)
         # De-tokenize just for the CountVectorizer.
         all_contexts.extend([' '.join(c) for c in contexts])
-    vectorizer = CountVectorizer()
+    vectorizer = CountVectorizer(min_df=config.count_vectorizer_min_df)
     vectorizer.fit(all_contexts)
 
+    # TODO: figure out why we're adding '^' and '$' to the vocabulary.
     vocabulary = vectorizer.vocabulary_
-    vocabulary[''] = len(vocabulary)
-    vocabulary['<UNK>'] = len(vocabulary)
+    vocabulary[MulticlassContextTransformer.UNKNOWN_WORD] = len(vocabulary)
+    vocabulary[MulticlassContextTransformer.NON_WORD] = len(vocabulary)
     # Start-of-word marker.
     vocabulary['^'] = len(vocabulary)
     # End-of-word marker.
@@ -754,6 +772,17 @@ def fit(config, callbacks=[]):
             vocabulary=vocabulary,
             output_width=config.context_input_width)
 
+    train_retriever = build_retriever(
+                list(vocabulary.keys()), 
+                n_random_candidates=config.n_random_train_candidates,
+                max_candidates=config.max_train_candidates,
+                n_neighbors=config.n_train_neighbors)
+
+    valid_retriever = build_retriever(list(vocabulary.keys()))
+
+    train_retriever.load_cache(verbose=True)
+    valid_retriever.load_cache(verbose=True)
+
     train_generator = BinaryGenerator(train_data,
             non_word_generator,
             char_input_transformer,
@@ -764,11 +793,7 @@ def fit(config, callbacks=[]):
             real_word_input_name=config.real_word_input_name,
             context_input_name=config.context_input_name,
             target_name=config.target_name,
-            retriever=build_retriever(
-                list(vocabulary.keys()), 
-                n_random_candidates=config.n_random_train_candidates,
-                max_candidates=config.max_train_candidates,
-                n_neighbors=config.n_train_neighbors),
+            retriever=train_retriever,
             n_classes=n_classes,
             sample_weight_exponent=config.class_weight_exponent)
 
@@ -782,7 +807,7 @@ def fit(config, callbacks=[]):
             real_word_input_name=config.real_word_input_name,
             context_input_name=config.context_input_name,
             target_name=config.target_name,
-            retriever=build_retriever(list(vocabulary.keys())),
+            retriever=valid_retriever,
             n_classes=n_classes,
             sample_weight_exponent=config.class_weight_exponent)
 
@@ -816,13 +841,6 @@ def fit(config, callbacks=[]):
 
     #print(next(train_generator.generate(train=True)))
     #print(next(valid_generator.generate(exhaustive=True)))
-
-    for node_name in graph.nodes.keys():
-        node = graph.nodes[node_name]
-        shape = 'NA'
-        if hasattr(node, 'W'):
-            shape = str(node.W.shape.eval())
-        config.logger('%10s: %s' % (node_name, shape))
 
     graph.fit_generator(train_generator.generate(train=True),
             samples_per_epoch=config.samples_per_epoch,

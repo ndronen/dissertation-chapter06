@@ -9,10 +9,11 @@
     "non_word_generator": "LearnedEditTransformer",
     "min_edits": 1,
     "max_edits": 1,
+    "count_vectorizer_min_df": 10,
 
     "n_random_train_candidates": 0,
     "max_train_candidates": 0,
-    "n_train_neighbors": 10,
+    "n_train_neighbors": 0,
 
     "pickle_path": "data/contexts-100-min-100-max-per-word.pkl",
     "min_frequency": 50,
@@ -24,10 +25,11 @@
     "char_input_width": 26,
     "n_char_embed_dims": 10,
     "n_char_embeddings": 255,
-    "n_char_filters": 1000,
+    "n_char_filters": 2000,
     "char_filter_width": 7,
     "char_merge_mode": "cos",
     "char_merge_n_hidden": 1,
+    "train_char_merge_layer": false,
     "char_merge_act": "tanh",
     "scale_char_merge_output": true,
     "char_merge_max_norm": 1,
@@ -35,7 +37,7 @@
     "context_input_width": 5,
     "n_context_embed_dims": 100,
     "n_context_embeddings": null,
-    "n_context_filters": 1000,
+    "n_context_filters": 2000,
     "context_filter_width": 5,
 
     "real_word_input_width": 1,
@@ -52,7 +54,10 @@
     "embedding_init": "uniform",
     "batch_normalization": false,
 
-    "optimizer": "Adam",
+    "optimizer": "SGD",
+    "learning_rate": 0.1,
+    "decay": 0.0,
+    "momentum": 0.9,
     "clipnorm": 0,
     "loss": "categorical_crossentropy",
 
@@ -67,7 +72,7 @@
     "batch_size": 32,
     "random_state": 17,
     "samples_per_epoch": 10000,
-    "n_worker": 1,
+    "n_worker": 10,
     "n_val_samples": 1000,
     "fixed_callback_validation_data": false,
 
