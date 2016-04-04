@@ -30,8 +30,8 @@
     "char_merge_mode": "cos",
     "char_merge_n_hidden": 1,
     "train_char_merge_layer": false,
-    "char_merge_act": "tanh",
-    "scale_char_merge_output": true,
+    "char_merge_act": "linear",
+    "scale_char_merge_output": false,
     "char_merge_max_norm": 1,
 
     "context_input_width": 5,
