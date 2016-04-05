@@ -98,6 +98,7 @@ def build_char_model(graph, config):
     # Character-level input for the non-word error.
     graph.add_input(config.non_word_char_input_name,
             input_shape=(config.char_input_width,), dtype='int')
+
     # Character-level input for the real word suggestion.
     graph.add_input(config.real_word_char_input_name,
             input_shape=(config.char_input_width,), dtype='int')
@@ -115,16 +116,11 @@ def build_char_model(graph, config):
             outputs=['non_word_char_embed',
                 'real_word_char_embed'])
 
-    graph.add_node(
-        GaussianNoise(config.gaussian_noise_sd),
-        name='non_word_char_embed_noise',
-        input='non_word_char_embed')
-
     char_conv_layer = build_convolutional_layer(config,
             n_filters=config.n_char_filters,
             filter_width=config.char_filter_width)
 
-    inputs = ['non_word_char_embed_noise', 'real_word_char_embed']
+    inputs = ['non_word_char_embed', 'real_word_char_embed']
     outputs = [re.sub('_embed.*', '_conv', s) for s in inputs]
     graph.add_shared_node(char_conv_layer,
             name='char_conv', inputs=inputs, outputs=outputs)
@@ -201,170 +197,7 @@ def build_char_model(graph, config):
 
     return non_word_output, char_merge_output
 
-def build_model(config, n_classes):
-    if config.model_type == 'convolutional_context':
-        return build_convolutional_context_model(config, n_classes)
-    elif config.model_type == 'flat_context':
-        return build_flat_context_model(config, n_classes)
-    else:
-        raise ValueError('unknown model type %s' % config.model_type)
-
-def build_flat_context_model(config, n_classes):
-    np.random.seed(config.random_state)
-
-    graph = Graph()
-
-    #######################################################################
-    # Character layers
-    #######################################################################
-    non_word_output, char_merge_output = build_char_model(graph, config)
-
-    #######################################################################
-    # Word layers
-    #######################################################################
-
-    # Word-level input for the context of the non-word error.
-    context_embedding_inputs = []
-    context_embedding_outputs = []
-    context_reshape_outputs = []
-    for i in range(1, 6):
-        name = '%s_%02d' % (config.context_input_name, i)
-        graph.add_input(name, input_shape=(1,), dtype='int')
-        context_embedding_inputs.append(name)
-        context_embedding_outputs.append(
-                'context_embedding_%02d' % i)
-        context_reshape_outputs.append(
-                'context_reshape_%02d' % i)
-
-    context_embedding = build_embedding_layer(config,
-            input_width=1,
-            n_embeddings=config.n_context_embeddings,
-            n_embed_dims=config.n_context_embed_dims,
-            dropout=config.dropout_embedding_p)
-
-    graph.add_shared_node(context_embedding,
-            name='context_embedding',
-            inputs=context_embedding_inputs,
-            outputs=context_embedding_outputs)
-
-    graph.add_shared_node(Reshape((config.n_context_embed_dims,)),
-        name='context_reshape',
-        inputs=context_embedding_outputs,
-        outputs=context_reshape_outputs)
-
-    graph.add_node(Identity(),
-            name='word_context',
-            inputs=context_reshape_outputs,
-            merge_mode='concat')
-
-    # Add some number of fully-connected layers without skip connections.
-    prev_layer = None
-    for i,n_hidden in enumerate(config.fully_connected):
-        layer_name = 'dense%02d' %i
-        l = build_dense_layer(config, n_hidden=n_hidden,
-                max_norm=config.dense_max_norm)
-        if i == 0:
-            inputs = ['word_context', non_word_output]
-            graph.add_node(l, name=layer_name,
-                    inputs=inputs,
-                    merge_mode='concat')
-        else:
-            graph.add_node(l, name=layer_name, input=prev_layer)
-        prev_layer = layer_name
-        if config.batch_normalization:
-            graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
-            prev_layer = layer_name+'bn'
-        graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
-        prev_layer = layer_name+'relu'
-        if config.dropout_fc_p > 0.:
-            graph.add_node(Dropout(config.dropout_fc_p), name=layer_name+'do', input=prev_layer)
-            prev_layer = layer_name+'do'
-
-    # Add sequence of residual blocks.
-    for i in range(config.n_residual_blocks):
-        # Add a fixed number of layers per residual block.
-        block_name = '%02d' % i
-
-        graph.add_node(Identity(), name=block_name+'input', input=prev_layer)
-        prev_layer = block_input_layer = block_name+'input'
-
-        try:
-            n_layers_per_residual_block = config.n_layers_per_residual_block
-        except AttributeError:
-            n_layers_per_residual_block = 2
-
-        for layer_num in range(n_layers_per_residual_block):
-            layer_name = 'h%s%02d' % (block_name, layer_num)
-    
-            l = Dense(config.n_hidden_residual, init=config.residual_init,
-                    W_constraint=maxnorm(config.residual_max_norm))
-            graph.add_node(l, name=layer_name, input=prev_layer)
-            prev_layer = layer_name
-    
-            if config.batch_normalization:
-                graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
-                prev_layer = layer_name+'bn'
-    
-            if i < n_layers_per_residual_block:
-                graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
-                prev_layer = layer_name+'relu'
-                if config.dropout_fc_p > 0.:
-                    graph.add_node(Dropout(config.dropout_residual_p), name=layer_name+'do', input=prev_layer)
-                    prev_layer = layer_name+'do'
-
-        graph.add_node(Identity(), name=block_name+'output', inputs=[block_input_layer, prev_layer], merge_mode='sum')
-        graph.add_node(Activation('relu'), name=block_name+'relu', input=block_name+'output')
-        prev_layer = block_input_layer = block_name+'relu'
-
-    softmax_inputs = [char_merge_output]
-    if prev_layer is None:
-        softmax_inputs.append('word_context')
-        # Not ready to do this yet -- it used to only happen at the
-        # beginning of the fully-connected block.
-        #softmax_inputs.append(non_word_output)
-        graph.add_node(Dense(n_classes, init=config.dense_init,
-            W_constraint=maxnorm(config.softmax_max_norm)),
-            name='softmax',
-            inputs=softmax_inputs,
-            merge_mode=config.merge_mode,
-            dot_axes=dot_axes)
-    else:
-        softmax_inputs.append(prev_layer)
-        graph.add_node(Dense(n_classes, init=config.dense_init,
-            W_constraint=maxnorm(config.softmax_max_norm)),
-            name='softmax',
-            inputs=softmax_inputs)
-    prev_layer = 'softmax'
-    if config.batch_normalization:
-        graph.add_node(BatchNormalization(), name='softmax_bn', input='softmax')
-        prev_layer = 'softmax_bn'
-    graph.add_node(Activation('softmax'), name='softmax_activation', input=prev_layer)
-    graph.add_output(name='binary_correction_target', input='softmax_activation')
-
-    load_weights(config, graph)
-
-    optimizer = build_optimizer(config)
-
-    graph.compile(loss={'binary_correction_target': config.loss}, optimizer=optimizer)
-
-    return graph
-
-def build_convolutional_context_model(config, n_classes):
-    np.random.seed(config.random_state)
-
-    graph = Graph()
-
-    #######################################################################
-    # Character layers
-    #######################################################################
-
-    non_word_output, char_merge_output = build_char_model(
-            graph, config)
-
-    #######################################################################
-    # Word layers
-    #######################################################################
-
+def build_context_model(graph, config):
     # Word-level input for the context of the non-word error.
     graph.add_input(config.context_input_name,
             input_shape=(config.context_input_width,), dtype='int')
@@ -405,6 +238,45 @@ def build_convolutional_context_model(config, n_classes):
             name='context_pool', input=context_prev_layer)
     graph.add_node(Flatten(), name='context_flatten', input='context_pool')
 
+    context_output = 'context_flatten'
+    real_word_output = 'real_word_reshape'
+
+    return real_word_output, context_output
+
+def build_model(config, n_classes):
+    np.random.seed(config.random_state)
+
+    graph = Graph()
+
+    #######################################################################
+    # Character layers
+    #######################################################################
+
+    dense_inputs = []
+    softmax_inputs = []
+
+    if config.use_char_model:
+        non_word_output, char_merge_output = build_char_model(graph, config)
+
+        if config.non_word_gaussian_noise_sd > 0.:
+            graph.add_node(GaussianNoise(config.non_word_gaussian_noise_sd),
+                    input=non_word_output,
+                    name='non_word_output_noise')
+            non_word_output = 'non_word_output_noise'
+
+        dense_inputs.append(non_word_output)
+        softmax_inputs.append(char_merge_output)
+
+    #######################################################################
+    # Word layers
+    #######################################################################
+
+    if config.use_context_model:
+        real_word_output, context_output = build_context_model(graph, config)
+        dense_inputs.append(context_output)
+        if config.use_real_word_embedding:
+            dense_inputs.append(real_word_output)
+
     if config.merge_mode == 'cos':
         dot_axes = ([1], [1])
     else:
@@ -417,13 +289,22 @@ def build_convolutional_context_model(config, n_classes):
         l = build_dense_layer(config, n_hidden=n_hidden,
                 max_norm=config.dense_max_norm)
         if i == 0:
-            inputs = ['context_flatten', non_word_output]
-            if config.use_real_word_embedding:
-                inputs.append('real_word_reshape')
-            graph.add_node(l, name=layer_name,
-                    inputs=inputs,
-                    merge_mode=config.merge_mode,
-                    dot_axes=dot_axes)
+            if len(dense_inputs) == 1:
+                graph.add_node(l, name=layer_name,
+                        input=dense_inputs[0],
+                        merge_mode=config.merge_mode,
+                        dot_axes=dot_axes)
+            else:
+                graph.add_node(l, name=layer_name,
+                        inputs=dense_inputs,
+                        merge_mode=config.merge_mode,
+                        dot_axes=dot_axes)
+            if config.dense_gaussian_noise_sd > 0.:
+                graph.add_node(
+                        GaussianNoise(config.dense_gaussian_noise_sd),
+                        name=layer_name+'gaussian',
+                        input=layer_name)
+            prev_layer = layer_name+'gaussian'
         else:
             graph.add_node(l, name=layer_name, input=prev_layer)
         prev_layer = layer_name
@@ -472,11 +353,8 @@ def build_convolutional_context_model(config, n_classes):
         graph.add_node(Activation('relu'), name=block_name+'relu', input=block_name+'output')
         prev_layer = block_input_layer = block_name+'relu'
 
-    softmax_inputs = [char_merge_output]
     if prev_layer is None:
-        softmax_inputs.append('context_flatten')
-        if config.use_real_word_embedding:
-            softmax_inputs.append('real_word_reshape')
+        softmax_inputs.extend(dense_inputs)
         graph.add_node(Dense(n_classes, init=config.dense_init,
             W_constraint=maxnorm(config.softmax_max_norm)),
             name='softmax',
@@ -485,10 +363,16 @@ def build_convolutional_context_model(config, n_classes):
             dot_axes=dot_axes)
     else:
         softmax_inputs.append(prev_layer)
-        graph.add_node(Dense(n_classes, init=config.dense_init,
-            W_constraint=maxnorm(config.softmax_max_norm)),
-            name='softmax',
-            inputs=softmax_inputs)
+        if len(softmax_inputs) == 1:
+            graph.add_node(Dense(n_classes, init=config.dense_init,
+                W_constraint=maxnorm(config.softmax_max_norm)),
+                name='softmax',
+                input=softmax_inputs[0])
+        else:
+            graph.add_node(Dense(n_classes, init=config.dense_init,
+                W_constraint=maxnorm(config.softmax_max_norm)),
+                name='softmax',
+                inputs=softmax_inputs)
     prev_layer = 'softmax'
     if config.batch_normalization:
         graph.add_node(BatchNormalization(), name='softmax_bn', input='softmax')
@@ -842,6 +726,13 @@ def fit(config, callbacks=[]):
     #print(next(train_generator.generate(train=True)))
     #print(next(valid_generator.generate(exhaustive=True)))
 
+    if 'background' in config.mode:
+        verbose = 2
+        with open(config.model_dest + '/model.yaml', 'w') as f:
+            f.write(graph.to_yaml())
+    else:
+        verbose = 1
+
     graph.fit_generator(train_generator.generate(train=True),
             samples_per_epoch=config.samples_per_epoch,
             nb_worker=config.n_worker,
@@ -851,3 +742,143 @@ def fit(config, callbacks=[]):
             callbacks=callbacks,
             class_weight=class_weight,
             verbose=verbose)
+
+#def build_flat_context_model(config, n_classes):
+#    np.random.seed(config.random_state)
+#
+#    graph = Graph()
+#
+#    #######################################################################
+#    # Character layers
+#    #######################################################################
+#    non_word_output, char_merge_output = build_char_model(graph, config)
+#
+#    #######################################################################
+#    # Word layers
+#    #######################################################################
+#
+#    # Word-level input for the context of the non-word error.
+#    context_embedding_inputs = []
+#    context_embedding_outputs = []
+#    context_reshape_outputs = []
+#    for i in range(1, 6):
+#        name = '%s_%02d' % (config.context_input_name, i)
+#        graph.add_input(name, input_shape=(1,), dtype='int')
+#        context_embedding_inputs.append(name)
+#        context_embedding_outputs.append(
+#                'context_embedding_%02d' % i)
+#        context_reshape_outputs.append(
+#                'context_reshape_%02d' % i)
+#
+#    context_embedding = build_embedding_layer(config,
+#            input_width=1,
+#            n_embeddings=config.n_context_embeddings,
+#            n_embed_dims=config.n_context_embed_dims,
+#            dropout=config.dropout_embedding_p)
+#
+#    graph.add_shared_node(context_embedding,
+#            name='context_embedding',
+#            inputs=context_embedding_inputs,
+#            outputs=context_embedding_outputs)
+#
+#    graph.add_shared_node(Reshape((config.n_context_embed_dims,)),
+#        name='context_reshape',
+#        inputs=context_embedding_outputs,
+#        outputs=context_reshape_outputs)
+#
+#    graph.add_node(Identity(),
+#            name='word_context',
+#            inputs=context_reshape_outputs,
+#            merge_mode='concat')
+#
+#    # Add some number of fully-connected layers without skip connections.
+#    prev_layer = None
+#    for i,n_hidden in enumerate(config.fully_connected):
+#        layer_name = 'dense%02d' %i
+#        l = build_dense_layer(config, n_hidden=n_hidden,
+#                max_norm=config.dense_max_norm)
+#        if i == 0:
+#            inputs = ['word_context', non_word_output]
+#            graph.add_node(l, name=layer_name,
+#                    inputs=inputs,
+#                    merge_mode='concat')
+#        else:
+#            graph.add_node(l, name=layer_name, input=prev_layer)
+#        prev_layer = layer_name
+#        if config.batch_normalization:
+#            graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
+#            prev_layer = layer_name+'bn'
+#        graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
+#        prev_layer = layer_name+'relu'
+#        if config.dropout_fc_p > 0.:
+#            graph.add_node(Dropout(config.dropout_fc_p), name=layer_name+'do', input=prev_layer)
+#            prev_layer = layer_name+'do'
+#
+#    # Add sequence of residual blocks.
+#    for i in range(config.n_residual_blocks):
+#        # Add a fixed number of layers per residual block.
+#        block_name = '%02d' % i
+#
+#        graph.add_node(Identity(), name=block_name+'input', input=prev_layer)
+#        prev_layer = block_input_layer = block_name+'input'
+#
+#        try:
+#            n_layers_per_residual_block = config.n_layers_per_residual_block
+#        except AttributeError:
+#            n_layers_per_residual_block = 2
+#
+#        for layer_num in range(n_layers_per_residual_block):
+#            layer_name = 'h%s%02d' % (block_name, layer_num)
+#    
+#            l = Dense(config.n_hidden_residual, init=config.residual_init,
+#                    W_constraint=maxnorm(config.residual_max_norm))
+#            graph.add_node(l, name=layer_name, input=prev_layer)
+#            prev_layer = layer_name
+#    
+#            if config.batch_normalization:
+#                graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
+#                prev_layer = layer_name+'bn'
+#    
+#            if i < n_layers_per_residual_block:
+#                graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
+#                prev_layer = layer_name+'relu'
+#                if config.dropout_fc_p > 0.:
+#                    graph.add_node(Dropout(config.dropout_residual_p), name=layer_name+'do', input=prev_layer)
+#                    prev_layer = layer_name+'do'
+#
+#        graph.add_node(Identity(), name=block_name+'output', inputs=[block_input_layer, prev_layer], merge_mode='sum')
+#        graph.add_node(Activation('relu'), name=block_name+'relu', input=block_name+'output')
+#        prev_layer = block_input_layer = block_name+'relu'
+#
+#    softmax_inputs = [char_merge_output]
+#    if prev_layer is None:
+#        softmax_inputs.append('word_context')
+#        # Not ready to do this yet -- it used to only happen at the
+#        # beginning of the fully-connected block.
+#        #softmax_inputs.append(non_word_output)
+#        graph.add_node(Dense(n_classes, init=config.dense_init,
+#            W_constraint=maxnorm(config.softmax_max_norm)),
+#            name='softmax',
+#            inputs=softmax_inputs,
+#            merge_mode=config.merge_mode,
+#            dot_axes=dot_axes)
+#    else:
+#        softmax_inputs.append(prev_layer)
+#        graph.add_node(Dense(n_classes, init=config.dense_init,
+#            W_constraint=maxnorm(config.softmax_max_norm)),
+#            name='softmax',
+#            inputs=softmax_inputs)
+#    prev_layer = 'softmax'
+#    if config.batch_normalization:
+#        graph.add_node(BatchNormalization(), name='softmax_bn', input='softmax')
+#        prev_layer = 'softmax_bn'
+#    graph.add_node(Activation('softmax'), name='softmax_activation', input=prev_layer)
+#    graph.add_output(name='binary_correction_target', input='softmax_activation')
+#
+#    load_weights(config, graph)
+#
+#    optimizer = build_optimizer(config)
+#
+#    graph.compile(loss={'binary_correction_target': config.loss}, optimizer=optimizer)
+#
+#    return graph
