@@ -490,9 +490,7 @@ class MulticlassGenerator(Generator):
 
         non_words = np.array(non_words)
         non_word_inputs = np.concatenate(non_word_inputs)
-        #print("contexts", contexts)
-        #contexts = np.concatenate(contexts, axis=1)
-        #print("contexts", contexts)
+
         context_inputs = np.concatenate(context_inputs)
         context_inputs_01 = np.concatenate(context_inputs_01)
         context_inputs_02 = np.concatenate(context_inputs_02)
@@ -501,21 +499,9 @@ class MulticlassGenerator(Generator):
         context_inputs_05 = np.concatenate(context_inputs_05)
         targets = np.concatenate(targets)
 
-        #print('words', len(words))
-        #print('non_words', non_words.shape)
-        #print('contexts', contexts.shape)
-        #print('context_inputs', context_inputs.shape)
-        #print('context_inputs_01', context_inputs_01.shape)
-        #print('context_inputs_02', context_inputs_02.shape)
-        #print('context_inputs_03', context_inputs_03.shape)
-        #print('context_inputs_04', context_inputs_04.shape)
-        #print('context_inputs_05', context_inputs_05.shape)
-        #print('targets', targets.shape)
-
         return {
                 'correct_word': np.array(kept_words),
                 'non_word': non_words,
-                #'context': contexts,
                 self.non_word_char_input_name: non_word_inputs,
                 self.context_input_name: context_inputs,
                 '%s_%02d' % (self.context_input_name,1): context_inputs_01,
@@ -527,11 +513,180 @@ class MulticlassGenerator(Generator):
                 }
 
 class BinaryGenerator(Generator):
-    def __init__(self, word_to_context, non_word_generator, char_input_transformer, real_word_input_transformer, context_input_transformer, non_word_char_input_name, real_word_char_input_name, real_word_input_name, context_input_name, target_name, retriever, n_classes=None, sample_weight_exponent=1, random_state=17):
+    def __init__(self, word_to_context, non_word_generator, char_input_transformer, real_word_input_transformer, context_input_transformer, non_word_char_input_name, real_word_char_input_name, real_word_input_name, context_input_name, target_name, retriever, n_classes=None, sample_weight_exponent=1, random_state=17, batch_size=1, use_real_word_examples=True):
         self.__dict__.update(locals())
-        self.random_state = random.Random(random_state)
+        self.random_state = check_random_state(random_state)
+
+    def generate_infinite(self, train=False):
+        print("generate_infinite", train)
+        words = list(sorted(self.word_to_context.keys()))
+        self.random_state.shuffle(words)
+        while True:
+            word_sample = self.random_state.choice(words,
+                    size=self.batch_size)
+            try:
+                yield self.build_next(word_sample)
+            except ValueError as e:
+                if str(e) == "no contexts found":
+                    continue
+                raise e
+            except Exception as e:
+                print('generate_infinite', word_sample, e, type(e))
+                print('')
+                (t, v, tb) = sys.exc_info()
+                traceback.print_tb(tb)
+                print('')
+
+    def build_next(self, words, ctx=None):
+        correct_words = []
+        non_words = []
+        non_word_char_inputs = []
+        real_words = []
+        real_word_char_inputs = []
+        modified_contexts = []
+        contexts = []
+        context_inputs = []
+        context_inputs_01 = []
+        context_inputs_02 = []
+        context_inputs_03 = []
+        context_inputs_04 = []
+        context_inputs_05 = []
+        targets = []
+
+        kept_words = []
+
+        if isinstance(words, str):
+            # Batch size is 1 and a single word was passed in.
+            words = [words]
+
+        #print('iterating over words', words)
+        for word in words:
+            #print('word', word)
+            # Sample a context, and replace the center word with each candidate.
+            try:
+                ctxs = self.word_to_context[word]
+                if len(ctxs) == 0:
+                    continue
+                j = self.random_state.choice(len(ctxs))
+                context = ctxs[j]
+            except IndexError:
+                print('index error - skipping word %s' % word)
+                continue
+
+            kept_words.append(word)
+
+            # FIXME: the generator sometimes creates real words.
+            non_word = self.non_word_generator.transform([word])[0]
+            # FIXME: does it matter whether the candidate list contains
+            # the non-word?
+            candidates = self.retriever[non_word]
+            # This ensures that there's always an example in a mini-batch
+            # with target 1.  
+            if word not in candidates:
+                candidates.append(word)
+
+            # Add the candidates to the batch.
+            correct_words.extend([word] * len(candidates))
+            non_words.extend([non_word] * len(candidates))
+            real_words.extend(candidates)
+
+            if self.use_real_word_examples:
+                # Add to the batch one more example, consisting of the
+                # real word itself as an example non-word, and the real
+                # word as the candidate and true correction.
+                correct_words.append(word)
+                non_words.append(word)
+                real_words.append(word)
+                candidates.append(word)
+
+            for candidate in candidates:
+                targets.append(1 if candidate == word else 0)
+                candidate_context = list(context)
+                candidate_context[int(len(candidate_context)/2)] = candidate
+                modified_contexts.append(candidate_context)
+
+            if all([t == 0 for t in targets]):
+                print('the correct word for "%s=>%s" is not in the candidate list' % (non_word, word),
+                        file=sys.stderr)
+
+            contexts.append(modified_contexts)
+
+        if len(kept_words) == 0:
+            raise ValueError("no contexts found")
+
+        context_inputs = self.context_input_transformer.transform(
+            modified_contexts)
+       
+        for i,ctx_input in enumerate(context_inputs):
+            context_inputs_01.append([ctx_input[0]])
+            context_inputs_02.append([ctx_input[1]])
+            context_inputs_03.append([ctx_input[2]])
+            context_inputs_04.append([ctx_input[3]])
+            context_inputs_05.append([ctx_input[4]])
+
+        #print("non_words", non_words)
+        #print("non_words[0]", non_words[0])
+        #print("non_words[-1]", non_words[-1])
+        #print("real_words", real_words)
+        #print("correct_words", correct_words)
+
+        non_word_char_inputs = self.char_input_transformer.transform(non_words)
+        real_word_char_inputs = self.char_input_transformer.transform(real_words)
+
+        # This transformer expects each example to be a list.  (Just this transformer?)
+        real_word_inputs = self.real_word_input_transformer.transform(
+            [[real_word] for real_word in real_words])
+
+        targets = np_utils.to_categorical(targets, 2)
+
+        data_dict = {
+                'correct_word': np.array(correct_words),
+                'non_word': np.array(non_words),
+                'candidate_word': np.array(real_words),
+                self.real_word_char_input_name: np.array(real_word_char_inputs),
+                self.non_word_char_input_name: np.array(non_word_char_inputs),
+                self.real_word_input_name: np.array(real_word_inputs),
+                self.context_input_name: context_inputs,
+                '%s_%02d' % (self.context_input_name,1): np.array(context_inputs_01),
+                '%s_%02d' % (self.context_input_name,2): np.array(context_inputs_02),
+                '%s_%02d' % (self.context_input_name,3): np.array(context_inputs_03),
+                '%s_%02d' % (self.context_input_name,4): np.array(context_inputs_04),
+                '%s_%02d' % (self.context_input_name,5): np.array(context_inputs_05),
+                self.target_name: targets
+                }
+
+        class_weights = balanced_class_weights(
+                targets[:, 1].astype(int),
+                n_classes=2,
+                class_weight_exponent=self.sample_weight_exponent)
+
+        sample_weights = np.zeros(len(real_words))
+
+        for k, candidate in enumerate(real_words):
+            sample_weights[k] = class_weights[targets[k, 1]]
+
+        sample_weight_dict = {
+                self.target_name: sample_weights 
+                }
+
+        #for k,v in data_dict.items():
+        #    print(k, v.shape)
+        #for k,v in sample_weight_dict.items():
+        #    print(k, v.shape)
+
+        return data_dict, sample_weight_dict
 
     def generate(self, exhaustive=False, train=False):
+        # TODO: implement generate_exhaustive for this class.
+        #if exhaustive:
+        #    return self.generate_exhaustive(train=train)
+        #else:
+        return self.generate_infinite(train=train)
+
+    """
+    def generate(self, exhaustive=False, train=False):
+        self.build_next(words)
+
         words = sorted(list(self.word_to_context.keys()))
         self.random_state.shuffle(words)
         while True:
@@ -594,10 +749,10 @@ class BinaryGenerator(Generator):
                         'correct_word': np.array([word] * len(candidates)),
                         'non_word': np.array([non_word[0]] * len(candidates)),
                         'candidate_word': np.array(candidates),
-                        self.real_word_char_input_name: real_word_char_input,
-                        self.non_word_char_input_name: non_word_char_input,
-                        self.real_word_input_name: real_word_input,
-                        self.context_input_name: context_input,
+                        self.real_word_char_input_name: np.array(real_word_char_input),
+                        self.non_word_char_input_name: np.array(non_word_char_input),
+                        self.real_word_input_name: np.array(real_word_input),
+                        self.context_input_name: np.array(context_input),
                         '%s_%02d' % (self.context_input_name,1): np.array(context_input_01),
                         '%s_%02d' % (self.context_input_name,2): np.array(context_input_02),
                         '%s_%02d' % (self.context_input_name,3): np.array(context_input_03),
@@ -618,7 +773,13 @@ class BinaryGenerator(Generator):
                         self.target_name: sample_weights 
                         }
 
+                for k,v in data_dict.items():
+                    print(k, v.shape)
+                for k,v in sample_weight_dict.items():
+                    print(k, v.shape)
+
                 yield data_dict, sample_weight_dict
+    """
 
 if __name__ == '__main__':
     unittest.main()
