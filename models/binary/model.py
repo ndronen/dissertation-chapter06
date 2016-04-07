@@ -1,4 +1,5 @@
 import re
+import gzip
 import string
 import random
 
@@ -197,7 +198,7 @@ def build_char_model(graph, config):
 
     return non_word_output, char_merge_output
 
-def build_context_model(graph, config):
+def build_context_model(graph, config, context_embedding_weights=None):
     # Word-level input for the context of the non-word error.
     graph.add_input(config.context_input_name,
             input_shape=(config.context_input_width,), dtype='int')
@@ -207,7 +208,13 @@ def build_context_model(graph, config):
             input_width=config.context_input_width,
             n_embeddings=config.n_context_embeddings,
             n_embed_dims=config.n_context_embed_dims,
-            dropout=config.dropout_embedding_p)
+            dropout=config.dropout_embedding_p,
+            trainable=config.train_context_embeddings)
+
+    if context_embedding_weights is not None:
+        config.logger('Setting context embedding weights of shape ' + str(
+            context_embedding_weights.shape))
+        context_embedding.set_weights([context_embedding_weights])
 
     graph.add_node(context_embedding,
             name='context_embedding',
@@ -243,7 +250,7 @@ def build_context_model(graph, config):
 
     return real_word_output, context_output
 
-def build_model(config, n_classes):
+def build_model(config, n_classes, context_embedding_weights=None):
     np.random.seed(config.random_state)
 
     graph = Graph()
@@ -272,7 +279,9 @@ def build_model(config, n_classes):
     #######################################################################
 
     if config.use_context_model:
-        real_word_output, context_output = build_context_model(graph, config)
+        real_word_output, context_output = build_context_model(
+                graph, config,
+                context_embedding_weights=context_embedding_weights)
         dense_inputs.append(context_output)
         if config.use_real_word_embedding:
             dense_inputs.append(real_word_output)
@@ -291,9 +300,7 @@ def build_model(config, n_classes):
         if i == 0:
             if len(dense_inputs) == 1:
                 graph.add_node(l, name=layer_name,
-                        input=dense_inputs[0],
-                        merge_mode=config.merge_mode,
-                        dot_axes=dot_axes)
+                        input=dense_inputs[0])
             else:
                 graph.add_node(l, name=layer_name,
                         inputs=dense_inputs,
@@ -345,7 +352,7 @@ def build_model(config, n_classes):
             if i < n_layers_per_residual_block:
                 graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
                 prev_layer = layer_name+'relu'
-                if config.dropout_fc_p > 0.:
+                if config.dropout_residual_p > 0.:
                     graph.add_node(Dropout(config.dropout_residual_p), name=layer_name+'do', input=prev_layer)
                     prev_layer = layer_name+'do'
 
@@ -544,7 +551,7 @@ def build_callbacks(config, generator, n_samples, other_generators={}):
 retriever_lock = threading.Lock()
 
 # Retrievers
-def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neighbors=0):
+def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neighbors=0, bottom_candidates=0):
     with retriever_lock:
         retrievers = []
         retrievers.append(spelldict.AspellRetriever())
@@ -565,12 +572,48 @@ def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neigh
                 cache_dir='/localwork/ndronen/spelling/spelling_error_cache/multiclass/')
         if max_candidates > 0:
             retriever = spelldict.TopKRetriever(retriever, max_candidates)
+        elif bottom_candidates > 0:
+            retriever = spelldict.BottomKRetriever(retriever, bottom_candidates)
         return retriever
 
 def count_contexts(contexts):
     return sum([len(c) for c in contexts.values()])
 
-def fit(config, callbacks=[]):
+def build_vocabulary(word_to_context, config):
+    # Fit the vocabulary over all the contexts.  For a word in any
+    # context to be included in the vocabulary, it must occur at least
+    # `min_df` times in the corpus of contexts.
+    all_contexts = []
+    for word,contexts in word_to_context.items():
+        all_contexts.append(word)
+        # De-tokenize just for the CountVectorizer.
+        all_contexts.extend([' '.join(c) for c in contexts])
+    vectorizer = CountVectorizer(min_df=config.count_vectorizer_min_df)
+    vectorizer.fit(all_contexts)
+
+    vocabulary = vectorizer.vocabulary_
+
+    # TODO: figure out why we're adding '^' and '$' to the vocabulary,
+    # and ASCII letters.
+    vocabulary[MulticlassContextTransformer.UNKNOWN_WORD] = len(vocabulary)
+    vocabulary[MulticlassContextTransformer.NON_WORD] = len(vocabulary)
+    # Start-of-word marker.
+    vocabulary['^'] = len(vocabulary)
+    # End-of-word marker.
+    vocabulary['$'] = len(vocabulary)
+    # ASCII letters.
+    for letter in string.ascii_letters:
+        if letter not in vocabulary:
+            vocabulary[letter] = len(vocabulary)
+
+    df = pd.read_csv('~/proj/spelling/data/aspell-dict.csv.gz', sep='\t', encoding='utf8')
+    for word in df.word.tolist():
+        if word not in vocabulary:
+            vocabulary[word] = len(vocabulary)
+
+    return vocabulary
+
+def load_data(config):
     loader = MulticlassLoader(pickle_path=config.pickle_path)
     word_to_context = loader.load()
 
@@ -578,8 +621,6 @@ def fit(config, callbacks=[]):
             count_contexts(word_to_context))
 
     # Drop any contexts that contain 'digit'.
-    # TODO: possibly eliminate this step; it may not be necessary now
-    # that we're using a non-default min_df argument to CountVectorizer.
     filter = DigitFilter()
     for word,contexts in word_to_context.items():
         word_to_context[word] = filter.transform(contexts)
@@ -597,33 +638,11 @@ def fit(config, callbacks=[]):
     for word,contexts in word_to_context.items():
         word_to_context[word] = windower.transform(contexts, [word] * len(contexts))
 
-    # Fit the vocabulary over all the contexts.  For a word in any
-    # context to be included in the vocabulary, it must occur at least
-    # `min_df` times in the corpus of contexts.
-    all_contexts = []
-    for word,contexts in word_to_context.items():
-        all_contexts.append(word)
-        # De-tokenize just for the CountVectorizer.
-        all_contexts.extend([' '.join(c) for c in contexts])
-    vectorizer = CountVectorizer(min_df=config.count_vectorizer_min_df)
-    vectorizer.fit(all_contexts)
+    return word_to_context
 
-    # TODO: figure out why we're adding '^' and '$' to the vocabulary.
-    vocabulary = vectorizer.vocabulary_
-    vocabulary[MulticlassContextTransformer.UNKNOWN_WORD] = len(vocabulary)
-    vocabulary[MulticlassContextTransformer.NON_WORD] = len(vocabulary)
-    # Start-of-word marker.
-    vocabulary['^'] = len(vocabulary)
-    # End-of-word marker.
-    vocabulary['$'] = len(vocabulary)
-    for letter in string.ascii_letters:
-        if letter not in vocabulary:
-            vocabulary[letter] = len(vocabulary)
-
-    df = pd.read_csv('~/proj/spelling/data/aspell-dict.csv.gz', sep='\t', encoding='utf8')
-    for word in df.word.tolist():
-        if word not in vocabulary:
-            vocabulary[word] = len(vocabulary)
+def fit(config, callbacks=[]):
+    word_to_context = load_data(config)
+    vocabulary = build_vocabulary(word_to_context, config)
 
     config.n_context_embeddings = len(vocabulary)
     print('n_context_embeddings %d' % config.n_context_embeddings)
@@ -660,12 +679,15 @@ def fit(config, callbacks=[]):
                 list(vocabulary.keys()), 
                 n_random_candidates=config.n_random_train_candidates,
                 max_candidates=config.max_train_candidates,
-                n_neighbors=config.n_train_neighbors)
+                n_neighbors=config.n_train_neighbors,
+                bottom_candidates=config.bottom_k_candidates_only)
+    print('train_retriever %s' % str(type(train_retriever)))
 
     valid_retriever = build_retriever(list(vocabulary.keys()))
 
-    train_retriever.load_cache(verbose=True)
-    valid_retriever.load_cache(verbose=True)
+    if config.preload_retriever_cache:
+        train_retriever.load_cache(verbose=True)
+        valid_retriever.load_cache(verbose=True)
 
     train_generator = BinaryGenerator(train_data,
             non_word_generator,
@@ -679,7 +701,8 @@ def fit(config, callbacks=[]):
             target_name=config.target_name,
             retriever=train_retriever,
             n_classes=n_classes,
-            sample_weight_exponent=config.class_weight_exponent)
+            sample_weight_exponent=config.class_weight_exponent,
+            batch_size=config.batch_size)
 
     valid_generator = BinaryGenerator(valid_data,
             non_word_generator,
@@ -709,7 +732,34 @@ def fit(config, callbacks=[]):
             n_classes=n_classes,
             sample_weight_exponent=config.class_weight_exponent)
 
-    graph = build_model(config, n_classes)
+    context_embedding_weights = None
+
+    if config.use_context_model or config.use_real_word_embedding:
+        try:
+            vectors_path = config.vectors_path
+
+            with gzip.open(vectors_path, 'rb') as f:
+                vectors_dict = pickle.load(f, encoding='latin1')
+
+            embedding_shape = (config.n_context_embeddings,
+                        config.n_context_embed_dims)
+            print("embedding_shape", embedding_shape)
+            context_embedding_weights = np.random.uniform(
+                    -0.05, 0.05, size=embedding_shape)
+
+            n_pretrained = 0
+            for word in vocabulary:
+                if word in vectors_dict:
+                    row = vocabulary[word]
+                    context_embedding_weights[row] = vectors_dict[word]
+                    n_pretrained += 1
+            print('using %d pretrained word vectors out of %d' %
+                    (n_pretrained, len(vocabulary)))
+        except (AttributeError, TypeError):
+            pass
+
+    graph = build_model(config, n_classes,
+            context_embedding_weights=context_embedding_weights)
 
     config.logger('model has %d parameters' % graph.count_params())
 

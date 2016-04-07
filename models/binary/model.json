@@ -9,12 +9,15 @@
     "min_edits": 1,
     "max_edits": 1,
     "count_vectorizer_min_df": 10,
+    "preload_retriever_cache": false,
 
     "n_random_train_candidates": 0,
     "max_train_candidates": 0,
     "n_train_neighbors": 0,
+    "bottom_k_candidates_only": 0,
 
     "pickle_path": "data/contexts-100-min-100-max-per-word.pkl",
+    "vectors_path": "data/vectors.pkl.gz",
     "min_frequency": 0,
     "min_length": 0,
     "max_length": 0,
@@ -34,10 +37,11 @@
     "char_merge_max_norm": 1,
 
     "context_input_width": 5,
-    "n_context_embed_dims": 100,
+    "n_context_embed_dims": 300,
     "n_context_embeddings": null,
     "n_context_filters": 2000,
     "context_filter_width": 5,
+    "train_context_embeddings": true,
 
     "real_word_input_width": 1,
     "n_real_word_embed_dims": 100,
@@ -50,7 +54,6 @@
     "n_residual_blocks": 0,
     "n_hidden_residual": 0,
 
-    "train_embeddings": true,
     "train_filters": true,
     "embedding_init": "uniform",
     "batch_normalization": false,
@@ -65,6 +68,7 @@
     "dropout_embedding_p": 0.0,
     "dropout_conv_p": 0.0,
     "dropout_fc_p": 0.0,
+    "dropout_residual_p": 0.0,
     "non_word_gaussian_noise_sd": 0.0,
     "dense_gaussian_noise_sd": 0.0,
 
