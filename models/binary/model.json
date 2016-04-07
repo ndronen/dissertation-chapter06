@@ -35,6 +35,7 @@
     "char_merge_act": "linear",
     "scale_char_merge_output": false,
     "char_merge_max_norm": 1,
+    "char_inputs_to_dense_block": ["non_word_output", "real_word_output"],
 
     "context_input_width": 5,
     "n_context_embed_dims": 300,
