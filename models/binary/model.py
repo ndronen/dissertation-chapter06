@@ -287,7 +287,7 @@ def build_model(config, n_classes, context_embedding_weights=None):
     # Word layers
     #######################################################################
 
-    if config.use_context_model:
+    if config.use_context_model or config.use_real_word_embedding:
         real_word_output, context_output = build_context_model(
                 graph, config,
                 context_embedding_weights=context_embedding_weights)
@@ -315,15 +315,20 @@ def build_model(config, n_classes, context_embedding_weights=None):
                         inputs=dense_inputs,
                         merge_mode=config.merge_mode,
                         dot_axes=dot_axes)
+
+            prev_layer = layer_name
+
+            # Only add noise to the first dense layer.
             if config.dense_gaussian_noise_sd > 0.:
                 graph.add_node(
                         GaussianNoise(config.dense_gaussian_noise_sd),
                         name=layer_name+'gaussian',
-                        input=layer_name)
-            prev_layer = layer_name+'gaussian'
+                        input=prev_layer)
+                prev_layer = prev_layer +'gaussian'
         else:
             graph.add_node(l, name=layer_name, input=prev_layer)
-        prev_layer = layer_name
+            prev_layer = layer_name
+
         if config.batch_normalization:
             graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
             prev_layer = layer_name+'bn'
@@ -371,24 +376,20 @@ def build_model(config, n_classes, context_embedding_weights=None):
 
     if prev_layer is None:
         softmax_inputs.extend(dense_inputs)
+    else:
+        softmax_inputs.append(prev_layer)
+
+    if len(softmax_inputs) == 1:
         graph.add_node(Dense(n_classes, init=config.dense_init,
             W_constraint=maxnorm(config.softmax_max_norm)),
             name='softmax',
-            inputs=softmax_inputs,
-            merge_mode=config.merge_mode,
-            dot_axes=dot_axes)
+            input=softmax_inputs[0])
     else:
-        softmax_inputs.append(prev_layer)
-        if len(softmax_inputs) == 1:
-            graph.add_node(Dense(n_classes, init=config.dense_init,
-                W_constraint=maxnorm(config.softmax_max_norm)),
-                name='softmax',
-                input=softmax_inputs[0])
-        else:
-            graph.add_node(Dense(n_classes, init=config.dense_init,
-                W_constraint=maxnorm(config.softmax_max_norm)),
-                name='softmax',
-                inputs=softmax_inputs)
+        graph.add_node(Dense(n_classes, init=config.dense_init,
+            W_constraint=maxnorm(config.softmax_max_norm)),
+            name='softmax',
+            inputs=softmax_inputs)
+
     prev_layer = 'softmax'
     if config.batch_normalization:
         graph.add_node(BatchNormalization(), name='softmax_bn', input='softmax')
