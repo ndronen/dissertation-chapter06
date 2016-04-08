@@ -190,13 +190,14 @@ def build_char_model(graph, config):
         prev_char_layer = 'char_merge_scale'
 
     non_word_output = 'non_word_flatten'
+    real_word_output = 'real_word_flatten'
     char_merge_output = 'char_merge_act'
 
     graph.add_node(Activation(config.char_merge_act),
             name=char_merge_output,
             input=prev_char_layer)
 
-    return non_word_output, char_merge_output
+    return non_word_output, real_word_output, char_merge_output
 
 def build_context_model(graph, config, context_embedding_weights=None):
     # Word-level input for the context of the non-word error.
@@ -263,7 +264,7 @@ def build_model(config, n_classes, context_embedding_weights=None):
     softmax_inputs = []
 
     if config.use_char_model:
-        non_word_output, char_merge_output = build_char_model(graph, config)
+        non_word_output, real_word_output, char_merge_output = build_char_model(graph, config)
 
         if config.non_word_gaussian_noise_sd > 0.:
             graph.add_node(GaussianNoise(config.non_word_gaussian_noise_sd),
@@ -271,7 +272,15 @@ def build_model(config, n_classes, context_embedding_weights=None):
                     name='non_word_output_noise')
             non_word_output = 'non_word_output_noise'
 
-        dense_inputs.append(non_word_output)
+        if config.char_merge_gaussian_noise_sd > 0.:
+            graph.add_node(GaussianNoise(config.char_merge_gaussian_noise_sd),
+                    input=char_merge_output,
+                    name='char_merge_output_noise')
+            char_merge_output = 'char_merge_output_noise'
+
+        for char_output in config.char_inputs_to_dense_block:
+            dense_inputs.append(locals()[char_output])
+
         softmax_inputs.append(char_merge_output)
 
     #######################################################################
@@ -413,6 +422,10 @@ class MetricsCallback(keras.callbacks.Callback):
         y_hat_dictionary = []
         y_hat_dictionary_binary = []
         counter = 0
+
+        learning_rate = self.model.optimizer.lr.get_value().item()
+        #print('current learning rate %f' % learning_rate)
+
         pbar = build_progressbar(self.n_samples)
         print('\n%s\n' % name)
 
@@ -435,6 +448,7 @@ class MetricsCallback(keras.callbacks.Callback):
                 sample_weight = None
 
             targets = d[self.config.target_name]
+            #print("targets", targets, d['candidate_word'], d['correct_word'], d['non_word'])
             pred = self.model.predict(d, verbose=0)[self.config.target_name]
 
             y.extend(targets[:, 1].tolist())
@@ -551,7 +565,7 @@ def build_callbacks(config, generator, n_samples, other_generators={}):
 retriever_lock = threading.Lock()
 
 # Retrievers
-def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neighbors=0, bottom_candidates=0):
+def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neighbors=0, bottom_candidates=0, exclude_candidates_containing_hyphen_or_space=False):
     with retriever_lock:
         retrievers = []
         retrievers.append(spelldict.AspellRetriever())
@@ -570,6 +584,11 @@ def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neigh
         retriever = spelldict.SortingRetriever(retriever, jaro_sorter)
         retriever = spelldict.CachingRetriever(retriever,
                 cache_dir='/localwork/ndronen/spelling/spelling_error_cache/multiclass/')
+
+        if exclude_candidates_containing_hyphen_or_space:
+            fltr = lambda word: ' ' not in word or '-' not in word
+            retriever = spelldict.FilteringRetriever(retriever, fltr)
+
         if max_candidates > 0:
             retriever = spelldict.TopKRetriever(retriever, max_candidates)
         elif bottom_candidates > 0:
@@ -649,7 +668,9 @@ def fit(config, callbacks=[]):
 
     n_classes = 2
 
-    splitter = MulticlassSplitter(word_to_context=word_to_context)
+    splitter = MulticlassSplitter(word_to_context=word_to_context,
+            train_size=config.train_size,
+            validation_size=config.validation_size)
     train_data, valid_data, test_data = splitter.split()
 
     def dataset_size(dataset):
@@ -680,10 +701,13 @@ def fit(config, callbacks=[]):
                 n_random_candidates=config.n_random_train_candidates,
                 max_candidates=config.max_train_candidates,
                 n_neighbors=config.n_train_neighbors,
-                bottom_candidates=config.bottom_k_candidates_only)
+                bottom_candidates=config.bottom_k_candidates_only,
+                exclude_candidates_containing_hyphen_or_space=config.exclude_candidates_containing_hyphen_or_space)
+
     print('train_retriever %s' % str(type(train_retriever)))
 
-    valid_retriever = build_retriever(list(vocabulary.keys()))
+    valid_retriever = build_retriever(list(vocabulary.keys()),
+                exclude_candidates_containing_hyphen_or_space=config.exclude_candidates_containing_hyphen_or_space)
 
     if config.preload_retriever_cache:
         train_retriever.load_cache(verbose=True)
@@ -702,7 +726,8 @@ def fit(config, callbacks=[]):
             retriever=train_retriever,
             n_classes=n_classes,
             sample_weight_exponent=config.class_weight_exponent,
-            batch_size=config.batch_size)
+            batch_size=config.batch_size,
+            use_real_word_examples=config.use_real_word_examples)
 
     valid_generator = BinaryGenerator(valid_data,
             non_word_generator,
@@ -761,12 +786,34 @@ def fit(config, callbacks=[]):
     graph = build_model(config, n_classes,
             context_embedding_weights=context_embedding_weights)
 
+
     config.logger('model has %d parameters' % graph.count_params())
 
     config.logger('building callbacks')
     callbacks = build_callbacks(config,
             valid_generator,
             n_samples=config.n_val_samples)
+
+    """
+    class Schedule(object):
+        def __init__(self, model):
+            self.model = model
+
+        def schedule(self, epoch):
+            learning_rate = self.model.optimizer.lr.get_value().item()
+            new_learning_rate = learning_rate
+
+            if epoch < 12 and epoch % 2 == 0:
+                new_learning_rate = learning_rate / 2
+
+            print('epoch %d old learning rate %f new learning rate %f' %
+                    (epoch, learning_rate, new_learning_rate))
+
+            return new_learning_rate
+
+    callbacks.append(keras.callbacks.LearningRateScheduler(
+        Schedule(graph).schedule))
+    """
 
     # Don't use class weights here; the targets are balanced.
     class_weight = {}
@@ -788,6 +835,7 @@ def fit(config, callbacks=[]):
             nb_worker=config.n_worker,
             nb_epoch=config.n_epoch,
             validation_data=valid_generator.generate(exhaustive=True),
+            #nb_val_samples=dataset_size(valid_data), #config.n_val_samples,
             nb_val_samples=config.n_val_samples,
             callbacks=callbacks,
             class_weight=class_weight,
