@@ -18,11 +18,12 @@ from chapter06.dataset import (
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.cross_validation import train_test_split
+from sklearn.decomposition import PCA
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.utils import check_random_state
 from sklearn.neighbors import NearestNeighbors
-from keras.constraints import maxnorm
+
 
 from spelling.edits import Editor
 from spelling.utils import build_progressbar
@@ -41,6 +42,8 @@ import numpy as np
 import pandas as pd
 
 from keras.models import Sequential, Graph
+from keras.constraints import maxnorm
+from keras.regularizers import l1, l2
 from keras.utils import np_utils
 from keras.layers.core import Dense, Dropout, Activation, Flatten, Layer, Lambda, Reshape, Merge
 from keras.layers.noise import GaussianNoise
@@ -58,6 +61,36 @@ from modeling.builders import (build_embedding_layer,
 from modeling.utils import balanced_class_weights
 
 import spelling.dictionary as spelldict
+
+class Schedule(object):
+    def __init__(self, model, epoch_lr_pairs):
+        self.model = model
+        self.epoch_lr_pairs = epoch_lr_pairs
+
+        assert isinstance(epoch_lr_pairs, list)
+        for p in epoch_lr_pairs:
+            assert isinstance(p[0], int)
+            assert isinstance(p[1], (float, str))
+
+    def schedule(self, epoch):
+        learning_rate = self.model.optimizer.lr.get_value().item()
+
+        try:
+            if epoch == self.epoch_lr_pairs[0][0]:
+                pair = self.epoch_lr_pairs.pop(0)
+                expression = pair[1]
+                try:
+                    learning_rate = float(expression)
+                except ValueError as e:
+                    try:
+                        learning_rate = eval('%f %s' % (learning_rate, expression))
+                    except Exception as e:
+                        pass
+                print('new learning rate %f' % learning_rate)
+        except IndexError as e:
+            pass
+
+        return learning_rate
 
 class Identity(Layer):
     def get_output(self, train):
@@ -152,12 +185,23 @@ def build_char_model(graph, config):
             inputs=['non_word_conv_act', 'real_word_conv_act'],
             outputs=['non_word_conv_pool', 'real_word_conv_pool'])
 
+    non_word_flatten = 'non_word_flatten'
+
     graph.add_shared_node(Flatten(),
             name='char_flatten',
-            inputs=['non_word_conv_pool',
-                'real_word_conv_pool'],
-            outputs=['non_word_flatten',
-                'real_word_flatten'])
+            inputs=['non_word_conv_pool', 'real_word_conv_pool'],
+            outputs=[non_word_flatten, 'real_word_flatten'])
+
+    if config.use_non_word_output_mlp:
+        layer_basename = non_word_flatten
+        prev_layer = non_word_flatten
+        for i in range(2):
+            graph.add_node(
+                    Dense(config.n_char_filters, W_constraint=maxnorm(1)),
+                    input=prev_layer,
+                    name='%s%02d' % (layer_basename, i))
+            non_word_flatten = '%s%02d' % (layer_basename, i)
+            prev_layer = non_word_flatten
 
     if config.char_merge_mode in ['cos', 'dot']:
         dot_axes = ([1], [1])
@@ -172,8 +216,7 @@ def build_char_model(graph, config):
             trainable=config.train_char_merge_layer)
     graph.add_node(char_merge_layer,
             name='char_merge',
-            inputs=['non_word_flatten',
-                'real_word_flatten'],
+            inputs=[non_word_flatten, 'real_word_flatten'],
             merge_mode=config.char_merge_mode,
             dot_axes=dot_axes)
 
@@ -281,7 +324,8 @@ def build_model(config, n_classes, context_embedding_weights=None):
         for char_output in config.char_inputs_to_dense_block:
             dense_inputs.append(locals()[char_output])
 
-        softmax_inputs.append(char_merge_output)
+        if config.use_char_merge:
+            softmax_inputs.append(char_merge_output)
 
     #######################################################################
     # Word layers
@@ -355,7 +399,8 @@ def build_model(config, n_classes, context_embedding_weights=None):
             layer_name = 'h%s%02d' % (block_name, layer_num)
     
             l = Dense(config.n_hidden_residual, init=config.dense_init,
-                    W_constraint=maxnorm(config.residual_max_norm))
+                    W_constraint=maxnorm(config.residual_max_norm),
+                    W_regularizer=l2(config.l2_penalty))
             graph.add_node(l, name=layer_name, input=prev_layer)
             prev_layer = layer_name
     
@@ -423,9 +468,6 @@ class MetricsCallback(keras.callbacks.Callback):
         y_hat_dictionary = []
         y_hat_dictionary_binary = []
         counter = 0
-
-        learning_rate = self.model.optimizer.lr.get_value().item()
-        #print('current learning rate %f' % learning_rate)
 
         pbar = build_progressbar(self.n_samples)
         print('\n%s\n' % name)
@@ -664,6 +706,10 @@ def fit(config, callbacks=[]):
     word_to_context = load_data(config)
     vocabulary = build_vocabulary(word_to_context, config)
 
+    lengths = [len(word) for word in word_to_context.keys()]
+    print('vocabulary min length %d max length %d' %
+            (min(lengths), max(lengths)))
+
     config.n_context_embeddings = len(vocabulary)
     print('n_context_embeddings %d' % config.n_context_embeddings)
 
@@ -684,7 +730,8 @@ def fit(config, callbacks=[]):
 
     non_word_generator = globals()[config.non_word_generator](
             min_edits=config.min_edits,
-            max_edits=config.max_edits)
+            max_edits=config.max_edits,
+            vocabulary=vocabulary)
 
     char_input_transformer = MulticlassNonwordTransformer(
             output_width=config.char_input_width)
@@ -768,25 +815,32 @@ def fit(config, callbacks=[]):
                 vectors_dict = pickle.load(f, encoding='latin1')
 
             embedding_shape = (config.n_context_embeddings,
-                        config.n_context_embed_dims)
+                        config.n_pretrained_context_embed_dims)
             print("embedding_shape", embedding_shape)
             context_embedding_weights = np.random.uniform(
                     -0.05, 0.05, size=embedding_shape)
 
             n_pretrained = 0
+
             for word in vocabulary:
                 if word in vectors_dict:
                     row = vocabulary[word]
                     context_embedding_weights[row] = vectors_dict[word]
                     n_pretrained += 1
+
             print('using %d pretrained word vectors out of %d' %
                     (n_pretrained, len(vocabulary)))
+
+            if config.n_context_embed_dims < config.n_pretrained_context_embed_dims:
+                # Reduce the dimensionality of the pretrained vectors.
+                pca = PCA(n_components=config.n_context_embed_dims)
+                context_embedding_weights = pca.fit_transform(
+                        context_embedding_weights)
         except (AttributeError, TypeError):
             pass
 
     graph = build_model(config, n_classes,
             context_embedding_weights=context_embedding_weights)
-
 
     config.logger('model has %d parameters' % graph.count_params())
 
@@ -795,26 +849,9 @@ def fit(config, callbacks=[]):
             valid_generator,
             n_samples=config.n_val_samples)
 
-    """
-    class Schedule(object):
-        def __init__(self, model):
-            self.model = model
-
-        def schedule(self, epoch):
-            learning_rate = self.model.optimizer.lr.get_value().item()
-            new_learning_rate = learning_rate
-
-            if epoch < 12 and epoch % 2 == 0:
-                new_learning_rate = learning_rate / 2
-
-            print('epoch %d old learning rate %f new learning rate %f' %
-                    (epoch, learning_rate, new_learning_rate))
-
-            return new_learning_rate
-
-    callbacks.append(keras.callbacks.LearningRateScheduler(
-        Schedule(graph).schedule))
-    """
+    scheduler = Schedule(graph, config.learning_rate_schedule)
+    callbacks.append(
+            keras.callbacks.LearningRateScheduler(scheduler.schedule))
 
     # Don't use class weights here; the targets are balanced.
     class_weight = {}
@@ -831,6 +868,8 @@ def fit(config, callbacks=[]):
     else:
         verbose = 1
 
+    # TODO: make validation generator run the same, fixed subset
+    # of the data at the end of every epoch.  
     graph.fit_generator(train_generator.generate(train=True),
             samples_per_epoch=config.samples_per_epoch,
             nb_worker=config.n_worker,

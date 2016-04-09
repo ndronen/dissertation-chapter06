@@ -42,6 +42,7 @@
     "char_inputs_to_dense_block": ["non_word_output", "real_word_output"],
 
     "context_input_width": 5,
+    "n_pretrained_context_embed_dims": 300,
     "n_context_embed_dims": 300,
     "n_context_embeddings": null,
     "n_context_filters": 2000,
@@ -54,6 +55,7 @@
     "use_real_word_embedding": false,
     "use_char_model": true,
     "use_context_model": true,
+    "use_char_merge": true,
 
     "fully_connected": [1000,100,10],
     "n_residual_blocks": 0,
@@ -65,6 +67,7 @@
 
     "optimizer": "SGD",
     "learning_rate": 0.1,
+    "learning_rate_schedule": [],
     "decay": 0.0,
     "momentum": 0.9,
     "clipnorm": 0,
@@ -74,9 +77,9 @@
     "dropout_conv_p": 0.0,
     "dropout_fc_p": 0.0,
     "dropout_residual_p": 0.0,
-    "non_word_gaussian_noise_sd": 0.1,
+    "non_word_gaussian_noise_sd": 0.0,
     "dense_gaussian_noise_sd": 0.0,
-    "char_merge_gaussian_noise_sd": 0.01,
+    "char_merge_gaussian_noise_sd": 0.0,
 
     "class_weight_exponent": 1,
     "patience": 10,
