@@ -704,6 +704,7 @@ def load_data(config):
 
 def fit(config, callbacks=[]):
     word_to_context = load_data(config)
+    print('%d keys in word_to_context' % len(word_to_context))
     vocabulary = build_vocabulary(word_to_context, config)
 
     lengths = [len(word) for word in word_to_context.keys()]
