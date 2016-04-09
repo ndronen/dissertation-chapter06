@@ -26,7 +26,7 @@ from sklearn.neighbors import NearestNeighbors
 
 
 from spelling.edits import Editor
-from spelling.utils import build_progressbar
+from spelling.utils import build_progressbar as build_pbar
 
 import sys
 # You need to increase the recursion limit to compile many-layered
@@ -469,7 +469,8 @@ class MetricsCallback(keras.callbacks.Callback):
         y_hat_dictionary_binary = []
         counter = 0
 
-        pbar = build_progressbar(self.n_samples)
+        pbar = build_pbar(self.n_samples)
+
         print('\n%s\n' % name)
 
         g = generator.generate(exhaustive=exhaustive)
@@ -629,7 +630,7 @@ def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neigh
                 cache_dir='/localwork/ndronen/spelling/spelling_error_cache/multiclass/')
 
         if exclude_candidates_containing_hyphen_or_space:
-            fltr = lambda word: ' ' not in word or '-' not in word
+            fltr = lambda word: ' ' not in word and '-' not in word
             retriever = spelldict.FilteringRetriever(retriever, fltr)
 
         if max_candidates > 0:
@@ -702,7 +703,7 @@ def load_data(config):
 
     return word_to_context
 
-def fit(config, callbacks=[]):
+def setup(config):
     word_to_context = load_data(config)
     print('%d keys in word_to_context' % len(word_to_context))
     vocabulary = build_vocabulary(word_to_context, config)
@@ -716,18 +717,20 @@ def fit(config, callbacks=[]):
 
     n_classes = 2
 
-    splitter = MulticlassSplitter(word_to_context=word_to_context,
+    data = []
+    for word,v in word_to_context.items():
+        for context in v:
+            data.append((word,context))
+
+    splitter = MulticlassSplitter(data,
             train_size=config.train_size,
             validation_size=config.validation_size)
     train_data, valid_data, test_data = splitter.split()
 
-    def dataset_size(dataset):
-        return sum([len(v) for v in dataset.values()])
-
     print('train %d validation %d test %d' % (
-        dataset_size(train_data),
-        dataset_size(valid_data),
-        dataset_size(test_data)))
+        len(train_data),
+        len(valid_data),
+        len(test_data)))
 
     non_word_generator = globals()[config.non_word_generator](
             min_edits=config.min_edits,
@@ -790,7 +793,8 @@ def fit(config, callbacks=[]):
             target_name=config.target_name,
             retriever=valid_retriever,
             n_classes=n_classes,
-            sample_weight_exponent=config.class_weight_exponent)
+            sample_weight_exponent=config.class_weight_exponent,
+            n_samples=config.n_val_samples)
 
     test_generator = BinaryGenerator(test_data,
             non_word_generator,
@@ -805,6 +809,33 @@ def fit(config, callbacks=[]):
             retriever=build_retriever(list(vocabulary.keys())),
             n_classes=n_classes,
             sample_weight_exponent=config.class_weight_exponent)
+
+    return {
+            'data': data,
+            'n_classes': n_classes,
+            'word_to_context': word_to_context,
+            'vocabulary': vocabulary,
+
+            'non_word_generator': non_word_generator,
+            'char_input_transformer': char_input_transformer,
+            'real_word_input_transformer': real_word_input_transformer,
+            'context_input_transformer': context_input_transformer,
+
+            'train_generator': train_generator,
+            'train_data': train_data,
+            'train_retreiver': train_retriever,
+
+            'valid_generator': valid_generator,
+            'valid_data': valid_data,
+            'valid_retreiver': valid_retriever,
+
+            'test_generator': test_generator,
+            'test_data': test_data,
+            }
+
+
+def fit(config):
+    setup_vars = setup(config)
 
     context_embedding_weights = None
 
@@ -823,14 +854,14 @@ def fit(config, callbacks=[]):
 
             n_pretrained = 0
 
-            for word in vocabulary:
+            for word in setup_vars['vocabulary']:
                 if word in vectors_dict:
-                    row = vocabulary[word]
+                    row = setup_vars['vocabulary'][word]
                     context_embedding_weights[row] = vectors_dict[word]
                     n_pretrained += 1
 
             print('using %d pretrained word vectors out of %d' %
-                    (n_pretrained, len(vocabulary)))
+                    (n_pretrained, len(setup_vars['vocabulary'])))
 
             if config.n_context_embed_dims < config.n_pretrained_context_embed_dims:
                 # Reduce the dimensionality of the pretrained vectors.
@@ -840,14 +871,39 @@ def fit(config, callbacks=[]):
         except (AttributeError, TypeError):
             pass
 
-    graph = build_model(config, n_classes,
+    graph = build_model(config, setup_vars['n_classes'],
             context_embedding_weights=context_embedding_weights)
 
     config.logger('model has %d parameters' % graph.count_params())
 
+    # Count the samples are in the validation set.  A sample consists
+    # of a non-word, a context, and one candidate replaced offered by
+    # the retriever.
+    #n_val_samples = 0
+    #config.logger('counting the validation set samples')
+    #pbar = build_pbar(setup_vars['valid_data'])
+    #validation_generator = setup_vars['valid_generator'].generate(exhaustive=True)
+    #try:
+    #    while True:
+    #        data = next(validation_generator)
+    #        if isinstance(data, (list,tuple)):
+    #            data, _ = data
+    #        n_val_samples += len(data[config.target_name])
+    #except StopIteration:
+    #    pass
+
+    #for i,(word,context) in enumerate(setup_vars['valid_data']):
+    #    pbar.update(i+1)
+    #    non_word = setup_vars['non_word_generator'].transform([word])[0]
+    #    candidates = setup_vars['valid_retreiver'][non_word]
+    #    n_val_samples += len(candidates) 
+    #pbar.finish()
+
+    config.logger('n_val_samples %d' % config.n_val_samples)
     config.logger('building callbacks')
+
     callbacks = build_callbacks(config,
-            valid_generator,
+            setup_vars['valid_generator'],
             n_samples=config.n_val_samples)
 
     scheduler = Schedule(graph, config.learning_rate_schedule)
@@ -859,8 +915,8 @@ def fit(config, callbacks=[]):
 
     verbose = 2 if 'background' in config.mode else 1
 
-    #print(next(train_generator.generate(train=True)))
-    #print(next(valid_generator.generate(exhaustive=True)))
+    #print(next(setup_vars['train_generator'].generate(train=True)))
+    #print(next(setup_vars['valid_generator'].generate(exhaustive=True)))
 
     if 'background' in config.mode:
         verbose = 2
@@ -871,153 +927,12 @@ def fit(config, callbacks=[]):
 
     # TODO: make validation generator run the same, fixed subset
     # of the data at the end of every epoch.  
-    graph.fit_generator(train_generator.generate(train=True),
+    graph.fit_generator(setup_vars['train_generator'].generate(exhaustive=False),
             samples_per_epoch=config.samples_per_epoch,
             nb_worker=config.n_worker,
             nb_epoch=config.n_epoch,
-            validation_data=valid_generator.generate(exhaustive=True),
-            #nb_val_samples=dataset_size(valid_data), #config.n_val_samples,
+            validation_data=setup_vars['valid_generator'].generate(exhaustive=True),
             nb_val_samples=config.n_val_samples,
             callbacks=callbacks,
             class_weight=class_weight,
             verbose=verbose)
-
-#def build_flat_context_model(config, n_classes):
-#    np.random.seed(config.random_state)
-#
-#    graph = Graph()
-#
-#    #######################################################################
-#    # Character layers
-#    #######################################################################
-#    non_word_output, char_merge_output = build_char_model(graph, config)
-#
-#    #######################################################################
-#    # Word layers
-#    #######################################################################
-#
-#    # Word-level input for the context of the non-word error.
-#    context_embedding_inputs = []
-#    context_embedding_outputs = []
-#    context_reshape_outputs = []
-#    for i in range(1, 6):
-#        name = '%s_%02d' % (config.context_input_name, i)
-#        graph.add_input(name, input_shape=(1,), dtype='int')
-#        context_embedding_inputs.append(name)
-#        context_embedding_outputs.append(
-#                'context_embedding_%02d' % i)
-#        context_reshape_outputs.append(
-#                'context_reshape_%02d' % i)
-#
-#    context_embedding = build_embedding_layer(config,
-#            input_width=1,
-#            n_embeddings=config.n_context_embeddings,
-#            n_embed_dims=config.n_context_embed_dims,
-#            dropout=config.dropout_embedding_p)
-#
-#    graph.add_shared_node(context_embedding,
-#            name='context_embedding',
-#            inputs=context_embedding_inputs,
-#            outputs=context_embedding_outputs)
-#
-#    graph.add_shared_node(Reshape((config.n_context_embed_dims,)),
-#        name='context_reshape',
-#        inputs=context_embedding_outputs,
-#        outputs=context_reshape_outputs)
-#
-#    graph.add_node(Identity(),
-#            name='word_context',
-#            inputs=context_reshape_outputs,
-#            merge_mode='concat')
-#
-#    # Add some number of fully-connected layers without skip connections.
-#    prev_layer = None
-#    for i,n_hidden in enumerate(config.fully_connected):
-#        layer_name = 'dense%02d' %i
-#        l = build_dense_layer(config, n_hidden=n_hidden,
-#                max_norm=config.dense_max_norm)
-#        if i == 0:
-#            inputs = ['word_context', non_word_output]
-#            graph.add_node(l, name=layer_name,
-#                    inputs=inputs,
-#                    merge_mode='concat')
-#        else:
-#            graph.add_node(l, name=layer_name, input=prev_layer)
-#        prev_layer = layer_name
-#        if config.batch_normalization:
-#            graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
-#            prev_layer = layer_name+'bn'
-#        graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
-#        prev_layer = layer_name+'relu'
-#        if config.dropout_fc_p > 0.:
-#            graph.add_node(Dropout(config.dropout_fc_p), name=layer_name+'do', input=prev_layer)
-#            prev_layer = layer_name+'do'
-#
-#    # Add sequence of residual blocks.
-#    for i in range(config.n_residual_blocks):
-#        # Add a fixed number of layers per residual block.
-#        block_name = '%02d' % i
-#
-#        graph.add_node(Identity(), name=block_name+'input', input=prev_layer)
-#        prev_layer = block_input_layer = block_name+'input'
-#
-#        try:
-#            n_layers_per_residual_block = config.n_layers_per_residual_block
-#        except AttributeError:
-#            n_layers_per_residual_block = 2
-#
-#        for layer_num in range(n_layers_per_residual_block):
-#            layer_name = 'h%s%02d' % (block_name, layer_num)
-#    
-#            l = Dense(config.n_hidden_residual, init=config.residual_init,
-#                    W_constraint=maxnorm(config.residual_max_norm))
-#            graph.add_node(l, name=layer_name, input=prev_layer)
-#            prev_layer = layer_name
-#    
-#            if config.batch_normalization:
-#                graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
-#                prev_layer = layer_name+'bn'
-#    
-#            if i < n_layers_per_residual_block:
-#                graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
-#                prev_layer = layer_name+'relu'
-#                if config.dropout_fc_p > 0.:
-#                    graph.add_node(Dropout(config.dropout_residual_p), name=layer_name+'do', input=prev_layer)
-#                    prev_layer = layer_name+'do'
-#
-#        graph.add_node(Identity(), name=block_name+'output', inputs=[block_input_layer, prev_layer], merge_mode='sum')
-#        graph.add_node(Activation('relu'), name=block_name+'relu', input=block_name+'output')
-#        prev_layer = block_input_layer = block_name+'relu'
-#
-#    softmax_inputs = [char_merge_output]
-#    if prev_layer is None:
-#        softmax_inputs.append('word_context')
-#        # Not ready to do this yet -- it used to only happen at the
-#        # beginning of the fully-connected block.
-#        #softmax_inputs.append(non_word_output)
-#        graph.add_node(Dense(n_classes, init=config.dense_init,
-#            W_constraint=maxnorm(config.softmax_max_norm)),
-#            name='softmax',
-#            inputs=softmax_inputs,
-#            merge_mode=config.merge_mode,
-#            dot_axes=dot_axes)
-#    else:
-#        softmax_inputs.append(prev_layer)
-#        graph.add_node(Dense(n_classes, init=config.dense_init,
-#            W_constraint=maxnorm(config.softmax_max_norm)),
-#            name='softmax',
-#            inputs=softmax_inputs)
-#    prev_layer = 'softmax'
-#    if config.batch_normalization:
-#        graph.add_node(BatchNormalization(), name='softmax_bn', input='softmax')
-#        prev_layer = 'softmax_bn'
-#    graph.add_node(Activation('softmax'), name='softmax_activation', input=prev_layer)
-#    graph.add_output(name='binary_correction_target', input='softmax_activation')
-#
-#    load_weights(config, graph)
-#
-#    optimizer = build_optimizer(config)
-#
-#    graph.compile(loss={'binary_correction_target': config.loss}, optimizer=optimizer)
-#
-#    return graph
