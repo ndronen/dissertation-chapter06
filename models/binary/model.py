@@ -471,7 +471,7 @@ class MetricsCallback(keras.callbacks.Callback):
 
         pbar = build_pbar(self.n_samples)
 
-        print('\n%s\n' % name)
+        self.config.logger('\n%s\n' % name)
 
         g = generator.generate(exhaustive=exhaustive)
 
@@ -492,7 +492,6 @@ class MetricsCallback(keras.callbacks.Callback):
                 sample_weight = None
 
             targets = d[self.config.target_name]
-            #print("targets", targets, d['candidate_word'], d['correct_word'], d['non_word'])
             pred = self.model.predict(d, verbose=0)[self.config.target_name]
 
             y.extend(targets[:, 1].tolist())
@@ -705,15 +704,15 @@ def load_data(config):
 
 def setup(config):
     word_to_context = load_data(config)
-    print('%d keys in word_to_context' % len(word_to_context))
+    config.logger('%d keys in word_to_context' % len(word_to_context))
     vocabulary = build_vocabulary(word_to_context, config)
 
     lengths = [len(word) for word in word_to_context.keys()]
-    print('vocabulary min length %d max length %d' %
+    config.logger('vocabulary min length %d max length %d' %
             (min(lengths), max(lengths)))
 
     config.n_context_embeddings = len(vocabulary)
-    print('n_context_embeddings %d' % config.n_context_embeddings)
+    config.logger('n_context_embeddings %d' % config.n_context_embeddings)
 
     n_classes = 2
 
@@ -727,7 +726,7 @@ def setup(config):
             validation_size=config.validation_size)
     train_data, valid_data, test_data = splitter.split()
 
-    print('train %d validation %d test %d' % (
+    config.logger('train %d validation %d test %d' % (
         len(train_data),
         len(valid_data),
         len(test_data)))
@@ -756,7 +755,7 @@ def setup(config):
                 bottom_candidates=config.bottom_k_candidates_only,
                 exclude_candidates_containing_hyphen_or_space=config.exclude_candidates_containing_hyphen_or_space)
 
-    print('train_retriever %s' % str(type(train_retriever)))
+    config.logger('train_retriever %s' % str(type(train_retriever)))
 
     valid_retriever = build_retriever(list(vocabulary.keys()),
                 exclude_candidates_containing_hyphen_or_space=config.exclude_candidates_containing_hyphen_or_space)
@@ -780,6 +779,8 @@ def setup(config):
             sample_weight_exponent=config.class_weight_exponent,
             batch_size=config.batch_size,
             use_real_word_examples=config.use_real_word_examples)
+
+    config.logger('a validation set example' + str(valid_data[0]))
 
     valid_generator = BinaryGenerator(valid_data,
             non_word_generator,
@@ -848,7 +849,7 @@ def fit(config):
 
             embedding_shape = (config.n_context_embeddings,
                         config.n_pretrained_context_embed_dims)
-            print("embedding_shape", embedding_shape)
+            config.logger("embedding_shape " + str(embedding_shape))
             context_embedding_weights = np.random.uniform(
                     -0.05, 0.05, size=embedding_shape)
 
@@ -860,7 +861,7 @@ def fit(config):
                     context_embedding_weights[row] = vectors_dict[word]
                     n_pretrained += 1
 
-            print('using %d pretrained word vectors out of %d' %
+            config.logger('using %d pretrained word vectors out of %d' %
                     (n_pretrained, len(setup_vars['vocabulary'])))
 
             if config.n_context_embed_dims < config.n_pretrained_context_embed_dims:
@@ -875,29 +876,6 @@ def fit(config):
             context_embedding_weights=context_embedding_weights)
 
     config.logger('model has %d parameters' % graph.count_params())
-
-    # Count the samples are in the validation set.  A sample consists
-    # of a non-word, a context, and one candidate replaced offered by
-    # the retriever.
-    #n_val_samples = 0
-    #config.logger('counting the validation set samples')
-    #pbar = build_pbar(setup_vars['valid_data'])
-    #validation_generator = setup_vars['valid_generator'].generate(exhaustive=True)
-    #try:
-    #    while True:
-    #        data = next(validation_generator)
-    #        if isinstance(data, (list,tuple)):
-    #            data, _ = data
-    #        n_val_samples += len(data[config.target_name])
-    #except StopIteration:
-    #    pass
-
-    #for i,(word,context) in enumerate(setup_vars['valid_data']):
-    #    pbar.update(i+1)
-    #    non_word = setup_vars['non_word_generator'].transform([word])[0]
-    #    candidates = setup_vars['valid_retreiver'][non_word]
-    #    n_val_samples += len(candidates) 
-    #pbar.finish()
 
     config.logger('n_val_samples %d' % config.n_val_samples)
     config.logger('building callbacks')
