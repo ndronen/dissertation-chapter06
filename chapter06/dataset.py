@@ -29,26 +29,31 @@ from keras.utils import np_utils
 ###########################################################################
 
 class RandomWordTransformer(object):
-    def __init__(self, min_edits=1, max_edits=1, random_state=17):
+    def __init__(self, min_edits=1, max_edits=1, random_state=17, vocabulary=set()):
         self.editor = spelling.edits.Editor()
         self.n_edits = [e for e in range(min_edits, max_edits+1)]
         self.random_state = random.Random(random_state)
+        self.vocabulary = set(vocabulary())
 
     def transform(self, X):
         transformed = []
         for x in X:
             n_edits = self.random_state.choice(self.n_edits)
             for i in range(n_edits):
-                exes = list(self.editor.edits(x))
-                x = self.random_state.choice(exes)
+                while True:
+                    exes = list(self.editor.edits(x))
+                    x = self.random_state.choice(exes)
+                    if x not in self.vocabulary:
+                        break
             transformed.append(x)
         return transformed
 
 
 class LearnedEditTransformer(object):
-    def __init__(self, min_edits=1, max_edits=1, n_attempts=1, random_state=17):
+    def __init__(self, min_edits=1, max_edits=1, n_attempts=1, random_state=17, vocabulary=set()):
         self.__dict__.update(locals())
         self.random_state = check_random_state(random_state)
+        self.vocabulary = set(vocabulary)
 
         self.spelling_path = os.path.dirname(spelling.__path__[0])
 
@@ -63,10 +68,12 @@ class LearnedEditTransformer(object):
         for word in X:
             non_word = None
             for i in range(self.n_attempts):
-                candidate_non_word = self.transform_word_(word)
-                if non_word in self.edit_db.errors:
+                non_word = self.transform_word_(word)
+                if non_word in self.edit_db.errors or non_word in self.vocabulary:
+                    # Disallow non-words that occur in one of the Mitton
+                    # spelling error corpora or that are real words that
+                    # occur in our vocabulary.
                     next
-                non_word = candidate_non_word
                 break
             # Let the client decide what to do with possible None.
             transformed.append(non_word)
@@ -167,28 +174,21 @@ class Splitter(object):
         raise NotImplementedError()
 
 class MulticlassSplitter(Splitter):
-    def __init__(self, word_to_context, train_size=0.9, validation_size=0.5, random_state=17, **kwargs):
+    def __init__(self, data, train_size=0.9, validation_size=0.5, random_state=17, **kwargs):
         self.__dict__.update(locals())
         self.random_state = check_random_state(random_state)
+        self.data = list(self.data)
 
     def split(self):
-        train_data = {}
-        validation_data = {}
-        test_data = {}
+        train_data, other_data = train_test_split(
+                self.data,
+                train_size=self.train_size,
+                random_state=self.random_state)
 
-        for word,contexts in self.word_to_context.items():
-            train_contexts, other_contexts = train_test_split(
-                    contexts, 
-                    train_size=self.train_size,
-                    random_state=self.random_state)
-            validation_contexts, test_contexts = train_test_split(
-                    other_contexts,
-                    train_size=self.validation_size,
-                    random_state=self.random_state)
-
-            train_data[word] = train_contexts
-            validation_data[word] = validation_contexts
-            test_data[word] = test_contexts
+        validation_data, test_data = train_test_split(
+                other_data,
+                train_size=self.validation_size,
+                random_state=self.random_state)
 
         return train_data, validation_data, test_data
 
@@ -387,27 +387,26 @@ class MulticlassGenerator(Generator):
     def generate_exhaustive(self, train=False):
         words = sorted(list(self.word_to_context.keys()))
         pbar = build_pbar(words)
-        while True:
-            for i,word in enumerate(words):
-                pbar.update(i+1)
-                word_list = []
-                word_list.append(word)
-                for context in self.word_to_context[word]:
-                    context_list = []
-                    context_list.append(context)
-                    try:
-                        yield self.build_next(word_list, context_list)
-                    except ValueError as e:
-                        if str(e) == "no contexts found":
-                            continue
-                        raise e
-                    except Exception as e:
-                        print('generate_exhaustive', word_list, context_list, e, type(e))
-                        print('')
-                        (t, v, tb) = sys.exc_info()
-                        traceback.print_tb(tb)
-                        print('')
-            pbar.finish()
+        for i,word in enumerate(words):
+            pbar.update(i+1)
+            word_list = []
+            word_list.append(word)
+            for context in self.word_to_context[word]:
+                context_list = []
+                context_list.append(context)
+                try:
+                    yield self.build_next(word_list, context_list)
+                except ValueError as e:
+                    if str(e) == "no contexts found":
+                        continue
+                    raise e
+                except Exception as e:
+                    print('generate_exhaustive', word_list, context_list, e, type(e))
+                    print('')
+                    (t, v, tb) = sys.exc_info()
+                    traceback.print_tb(tb)
+                    print('')
+        pbar.finish()
 
     def generate_infinite(self, train=False):
         words = np.array(list(self.word_to_context.keys()))
@@ -513,7 +512,7 @@ class MulticlassGenerator(Generator):
                 }
 
 class BinaryGenerator(Generator):
-    def __init__(self, word_to_context, non_word_generator, char_input_transformer, real_word_input_transformer, context_input_transformer, non_word_char_input_name, real_word_char_input_name, real_word_input_name, context_input_name, target_name, retriever, n_classes=None, sample_weight_exponent=1, random_state=17, batch_size=1, use_real_word_examples=False):
+    def __init__(self, data, non_word_generator, char_input_transformer, real_word_input_transformer, context_input_transformer, non_word_char_input_name, real_word_char_input_name, real_word_input_name, context_input_name, target_name, retriever, n_classes=None, sample_weight_exponent=1, random_state=17, batch_size=1, use_real_word_examples=False, n_samples=None):
         self.__dict__.update(locals())
         self.random_state = check_random_state(random_state)
 
@@ -524,51 +523,49 @@ class BinaryGenerator(Generator):
             return self.generate_infinite(train=train)
 
     def generate_infinite(self, train=False):
-        words = list(sorted(self.word_to_context.keys()))
-        self.random_state.shuffle(words)
+        self.random_state.shuffle(self.data)
         while True:
-            word_sample = self.random_state.choice(words,
-                    size=self.batch_size)
             try:
-                yield self.build_next(word_sample)
+                idx = self.random_state.choice(len(self.data),
+                        replace=False, size=self.batch_size)
+                sample = [self.data[i] for i in idx]
+                yield self.build_next(sample)
             except ValueError as e:
                 if str(e) == "no contexts found":
                     continue
+                print(e)
                 raise e
             except Exception as e:
-                print('generate_infinite', word_sample, e, type(e))
+                print('generate_infinite', sample, e, type(e))
                 print('')
                 (t, v, tb) = sys.exc_info()
                 traceback.print_tb(tb)
                 print('')
 
     def generate_exhaustive(self, train=False):
-        words = sorted(list(self.word_to_context.keys()))
-        pbar = build_pbar(words)
-        print('generate_exhaustive')
+        if self.n_samples is not None:
+            n_samples = self.n_samples
+        else:
+            n_samples = len(self.data)
+
         while True:
-            for i,word in enumerate(words):
+            pbar = build_pbar(n_samples)
+            for i in range(n_samples):
                 pbar.update(i+1)
-                word_list = []
-                word_list.append(word)
-                for context in self.word_to_context[word]:
-                    context_list = []
-                    context_list.append(context)
-                    try:
-                        yield self.build_next(word_list, context_list)
-                    except ValueError as e:
-                        if str(e) == "no contexts found":
-                            continue
-                        raise e
-                    except Exception as e:
-                        print('generate_exhaustive', word_list, context_list, e, type(e))
-                        print('')
-                        (t, v, tb) = sys.exc_info()
-                        traceback.print_tb(tb)
-                        print('')
+
+                try:
+                    sample = self.data[i]
+                    yield self.build_next([sample])
+                except Exception as e:
+                    print('generate_exhaustive', sample, e, type(e))
+                    print('')
+                    (t, v, tb) = sys.exc_info()
+                    traceback.print_tb(tb)
+                    print('')
+
             pbar.finish()
 
-    def build_next(self, words, ctx=None):
+    def build_next(self, samples):
         correct_words = []
         non_words = []
         non_word_char_inputs = []
@@ -577,37 +574,10 @@ class BinaryGenerator(Generator):
         modified_contexts = []
         contexts = []
         context_inputs = []
-        context_inputs_01 = []
-        context_inputs_02 = []
-        context_inputs_03 = []
-        context_inputs_04 = []
-        context_inputs_05 = []
         targets = []
         sample_weights = []
 
-        kept_words = []
-
-        if isinstance(words, str):
-            # Batch size is 1 and a single word was passed in.
-            words = [words]
-
-        for i,word in enumerate(words):
-            # Sample a context, and replace the center word with each candidate.
-            try:
-                if ctx is None:
-                    ctxs = self.word_to_context[word]
-                    if len(ctxs) == 0:
-                        continue
-                    j = self.random_state.choice(len(ctxs))
-                    context = ctxs[j]
-                else:
-                    context = ctx[i]
-            except IndexError:
-                print('index error - skipping word %s' % word)
-                continue
-
-            kept_words.append(word)
-
+        for i,(word,context) in enumerate(samples):
             # TODO: the generator sometimes creates real words.
             non_word = self.non_word_generator.transform([word])[0]
             # TODO: does it matter whether the candidate list contains
@@ -652,19 +622,9 @@ class BinaryGenerator(Generator):
 
             contexts.append(modified_contexts)
 
-        if len(kept_words) == 0:
-            raise ValueError("no contexts found")
-
         context_inputs = self.context_input_transformer.transform(
             modified_contexts)
        
-        for i,ctx_input in enumerate(context_inputs):
-            context_inputs_01.append([ctx_input[0]])
-            context_inputs_02.append([ctx_input[1]])
-            context_inputs_03.append([ctx_input[2]])
-            context_inputs_04.append([ctx_input[3]])
-            context_inputs_05.append([ctx_input[4]])
-
         #print("non_words", non_words)
         #print("non_words[0]", non_words[0])
         #print("non_words[-1]", non_words[-1])
@@ -688,11 +648,11 @@ class BinaryGenerator(Generator):
                 self.non_word_char_input_name: np.array(non_word_char_inputs),
                 self.real_word_input_name: np.array(real_word_inputs),
                 self.context_input_name: context_inputs,
-                '%s_%02d' % (self.context_input_name,1): np.array(context_inputs_01),
-                '%s_%02d' % (self.context_input_name,2): np.array(context_inputs_02),
-                '%s_%02d' % (self.context_input_name,3): np.array(context_inputs_03),
-                '%s_%02d' % (self.context_input_name,4): np.array(context_inputs_04),
-                '%s_%02d' % (self.context_input_name,5): np.array(context_inputs_05),
+                #'%s_%02d' % (self.context_input_name,1): np.array(context_inputs_01),
+                #'%s_%02d' % (self.context_input_name,2): np.array(context_inputs_02),
+                #'%s_%02d' % (self.context_input_name,3): np.array(context_inputs_03),
+                #'%s_%02d' % (self.context_input_name,4): np.array(context_inputs_04),
+                #'%s_%02d' % (self.context_input_name,5): np.array(context_inputs_05),
                 self.target_name: targets
                 }
 
