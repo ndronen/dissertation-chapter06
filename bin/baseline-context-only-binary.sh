@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# TODO: change chapter06.datasets.BinaryGenerator to output just the
+# real word embedding, not the embeddings of all the words in the context.
+# TODO: see what effect varying the size of the context window has
+# on model performance.
+
 # This script has the command to train a good context-only (i.e. lexical
 # context of non-word and a candidate) binary model.
 
