@@ -7,6 +7,7 @@ from modeling.callbacks import DenseWeightNormCallback
 from chapter06.dataset import (
         MulticlassLoader,
         MulticlassSplitter,
+        HoldOutByWordSplitter,
         BinaryGenerator,
         ContextTokenizer,
         ContextWindowTransformer,
@@ -243,6 +244,15 @@ def build_char_model(graph, config):
     return non_word_output, real_word_output, char_merge_output
 
 def build_context_model(graph, config, context_embedding_weights=None):
+    if config.context_model_type == 'flat':
+        return build_flat_context_model(graph, config, context_embedding_weights)
+    elif config.context_model_type == 'convolutional':
+        return build_convolutional_context_model(graph, config, context_embedding_weights)
+    else:
+        raise ValueError("unknown context_model_type %s" % 
+                config.context_model_type)
+
+def build_convolutional_context_model(graph, config, context_embedding_weights=None):
     # Word-level input for the context of the non-word error.
     graph.add_input(config.context_input_name,
             input_shape=(config.context_input_width,), dtype='int')
@@ -292,10 +302,69 @@ def build_context_model(graph, config, context_embedding_weights=None):
     context_output = 'context_flatten'
     real_word_output = 'real_word_reshape'
 
-    return real_word_output, context_output
+    return context_output, real_word_output
+
+def build_flat_context_model(graph, config, context_embedding_weights=None):
+    #np.random.seed(config.random_state)
+
+    #graph = Graph()
+
+    #######################################################################
+    # Character layers
+    #######################################################################
+    #non_word_output, real_word_output, char_merge_output = build_char_model(graph, config)
+
+    #######################################################################
+    # Word layers
+    #######################################################################
+
+    # Word-level input for the context of the non-word error.
+    context_embedding_inputs = []
+    context_embedding_outputs = []
+    context_reshape_outputs = []
+    for i in range(1, 6):
+        name = '%s_%02d' % (config.context_input_name, i)
+        graph.add_input(name, input_shape=(1,), dtype='int')
+        context_embedding_inputs.append(name)
+        context_embedding_outputs.append(
+                'context_embedding_%02d' % i)
+        context_reshape_outputs.append(
+                'context_reshape_%02d' % i)
+
+    context_embedding = build_embedding_layer(config,
+            input_width=1,
+            n_embeddings=config.n_context_embeddings,
+            n_embed_dims=config.n_context_embed_dims,
+            dropout=config.dropout_embedding_p)
+
+    if context_embedding_weights is not None:
+        config.logger('Setting context embedding weights of shape ' + str(
+            context_embedding_weights.shape))
+        context_embedding.set_weights([context_embedding_weights])
+
+    graph.add_shared_node(context_embedding,
+            name='context_embedding',
+            inputs=context_embedding_inputs,
+            outputs=context_embedding_outputs)
+
+    graph.add_shared_node(Reshape((config.n_context_embed_dims,)),
+        name='context_reshape',
+        inputs=context_embedding_outputs,
+        outputs=context_reshape_outputs)
+
+    graph.add_node(Identity(),
+            name='word_context',
+            inputs=context_reshape_outputs,
+            merge_mode='concat')
+
+    context_output = 'word_context'
+
+    return context_output, None
 
 def build_model(config, n_classes, context_embedding_weights=None):
     np.random.seed(config.random_state)
+
+    config.logger('build_model context_embedding_weights ' + str(type(context_embedding_weights)))
 
     graph = Graph()
 
@@ -332,12 +401,15 @@ def build_model(config, n_classes, context_embedding_weights=None):
     #######################################################################
 
     if config.use_context_model or config.use_real_word_embedding:
-        real_word_output, context_output = build_context_model(
+        config.logger('passing context_embedding_weights to build_context_model ' +
+                str(type(context_embedding_weights)))
+        context_output, real_word_output = build_context_model(
                 graph, config,
                 context_embedding_weights=context_embedding_weights)
         dense_inputs.append(context_output)
         if config.use_real_word_embedding:
-            dense_inputs.append(real_word_output)
+            if real_word_output is not None:
+                dense_inputs.append(real_word_output)
 
     if config.merge_mode == 'cos':
         dot_axes = ([1], [1])
@@ -721,9 +793,11 @@ def setup(config):
         for context in v:
             data.append((word,context))
 
-    splitter = MulticlassSplitter(data,
+    splitter = globals()[config.dataset_splitter](
+            word_to_context,
             train_size=config.train_size,
             validation_size=config.validation_size)
+
     train_data, valid_data, test_data = splitter.split()
 
     config.logger('train %d validation %d test %d' % (

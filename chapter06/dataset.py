@@ -174,14 +174,18 @@ class Splitter(object):
         raise NotImplementedError()
 
 class MulticlassSplitter(Splitter):
-    def __init__(self, data, train_size=0.9, validation_size=0.5, random_state=17, **kwargs):
+    def __init__(self, word_to_context, train_size=0.9, validation_size=0.5, random_state=17, **kwargs):
         self.__dict__.update(locals())
         self.random_state = check_random_state(random_state)
-        self.data = list(self.data)
 
     def split(self):
+        data = []
+        for word,contexts in self.word_to_context.items():
+            for context in contexts:
+                data.append((word, context))
+
         train_data, other_data = train_test_split(
-                self.data,
+                data,
                 train_size=self.train_size,
                 random_state=self.random_state)
 
@@ -191,6 +195,42 @@ class MulticlassSplitter(Splitter):
                 random_state=self.random_state)
 
         return train_data, validation_data, test_data
+
+class HoldOutByWordSplitter(Splitter):
+    def __init__(self, word_to_context, train_size=0.9, validation_size=0.5, random_state=17, **kwargs):
+        self.__dict__.update(locals())
+        self.random_state = check_random_state(random_state)
+
+    def split(self):
+        words = list(self.word_to_context.keys())
+
+        train_words, other_words = train_test_split(
+                words,
+                train_size=self.train_size,
+                random_state=self.random_state)
+
+        validation_words, test_words = train_test_split(
+                other_words,
+                train_size=self.validation_size,
+                random_state=self.random_state)
+
+        train_data = []
+        for word in train_words:
+            for context in self.word_to_context[word]:
+                train_data.append((word, context))
+
+        validation_data = []
+        for word in validation_words:
+            for context in self.word_to_context[word]:
+                validation_data.append((word, context))
+
+        test_data = []
+        for word in test_words:
+            for context in self.word_to_context[word]:
+                test_data.append((word, context))
+
+        return train_data, validation_data, test_data
+
 
 ###########################################################################
 # Data set filters
@@ -574,6 +614,11 @@ class BinaryGenerator(Generator):
         modified_contexts = []
         contexts = []
         context_inputs = []
+        context_inputs_01 = []
+        context_inputs_02 = []
+        context_inputs_03 = []
+        context_inputs_04 = []
+        context_inputs_05 = []
         targets = []
         sample_weights = []
 
@@ -624,6 +669,13 @@ class BinaryGenerator(Generator):
 
         context_inputs = self.context_input_transformer.transform(
             modified_contexts)
+
+        for i,ctx_input in enumerate(context_inputs):
+            context_inputs_01.append([ctx_input[0]])
+            context_inputs_02.append([ctx_input[1]])
+            context_inputs_03.append([ctx_input[2]])
+            context_inputs_04.append([ctx_input[3]])
+            context_inputs_05.append([ctx_input[4]])
        
         #print("non_words", non_words)
         #print("non_words[0]", non_words[0])
@@ -648,11 +700,11 @@ class BinaryGenerator(Generator):
                 self.non_word_char_input_name: np.array(non_word_char_inputs),
                 self.real_word_input_name: np.array(real_word_inputs),
                 self.context_input_name: context_inputs,
-                #'%s_%02d' % (self.context_input_name,1): np.array(context_inputs_01),
-                #'%s_%02d' % (self.context_input_name,2): np.array(context_inputs_02),
-                #'%s_%02d' % (self.context_input_name,3): np.array(context_inputs_03),
-                #'%s_%02d' % (self.context_input_name,4): np.array(context_inputs_04),
-                #'%s_%02d' % (self.context_input_name,5): np.array(context_inputs_05),
+                '%s_%02d' % (self.context_input_name,1): np.array(context_inputs_01),
+                '%s_%02d' % (self.context_input_name,2): np.array(context_inputs_02),
+                '%s_%02d' % (self.context_input_name,3): np.array(context_inputs_03),
+                '%s_%02d' % (self.context_input_name,4): np.array(context_inputs_04),
+                '%s_%02d' % (self.context_input_name,5): np.array(context_inputs_05),
                 self.target_name: targets
                 }
 
