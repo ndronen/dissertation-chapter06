@@ -20,4 +20,4 @@ n_context_embed_dims=20
 bin/train.py models/binary \
     --mode persistent-background \
     --model-dest $model_dest \
-    --model-cfg fully_connected='[$n_hidden]' n_residual_blocks=$n_residual_blocks n_hidden_residual=$n_hidden n_epoch=500 patience=50 samples_per_epoch=$n_train pickle_path=$pickle_path use_context_model=true context_model_type="flat" use_char_model=false batch_normalization=true class_weight_exponent=1 vectors_path=$vectors_path batch_size=100 n_val_samples=$n_valid optimizer=Adam n_context_embed_dims=$n_context_embed_dims train_size=$n_train validation_size=$n_valid l2_penalty=$l2_penalty 
+    --model-cfg fully_connected="[$n_hidden]" n_residual_blocks=$n_residual_blocks n_hidden_residual=$n_hidden n_epoch=500 patience=50 samples_per_epoch=$n_train pickle_path=$pickle_path use_context_model=true context_model_type="flat" use_char_model=false batch_normalization=true class_weight_exponent=1 vectors_path=$vectors_path batch_size=100 n_val_samples=$n_valid optimizer=Adam n_context_embed_dims=$n_context_embed_dims train_size=$n_train validation_size=$n_valid l2_penalty=$l2_penalty 
