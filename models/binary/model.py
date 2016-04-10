@@ -266,7 +266,7 @@ def build_convolutional_context_model(graph, config, context_embedding_weights=N
             trainable=config.train_context_embeddings)
 
     if context_embedding_weights is not None:
-        config.logger('Setting context embedding weights of shape ' + str(
+        config.logger('setting context embedding weights of shape ' + str(
             context_embedding_weights.shape))
         context_embedding.set_weights([context_embedding_weights])
 
@@ -338,7 +338,7 @@ def build_flat_context_model(graph, config, context_embedding_weights=None):
             dropout=config.dropout_embedding_p)
 
     if context_embedding_weights is not None:
-        config.logger('Setting context embedding weights of shape ' + str(
+        config.logger('setting context embedding weights of shape ' + str(
             context_embedding_weights.shape))
         context_embedding.set_weights([context_embedding_weights])
 
