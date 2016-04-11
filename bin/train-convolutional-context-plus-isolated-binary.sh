@@ -34,7 +34,7 @@ l2_penalty=0.0
 dropout_fc_p=0.0
 dropout_residual_p=0.0
 batch_normalization=false
-non_word_gaussian_noise_sd=0.0
+non_word_gaussian_noise_sd=0.05
 
     #--model-dest $model_dest \
 bin/train.py models/binary \
