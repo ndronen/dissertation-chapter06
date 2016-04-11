@@ -769,11 +769,7 @@ def load_data(config):
     config.logger('%d word_to_context words before length filtering' %
             len(word_to_context))
 
-    def tolist(keys):
-        print("tolist")
-        return list(keys)
-
-    for word in tolist(word_to_context.keys()):
+    for word in list(word_to_context.keys()):
         if len(word) < config.min_length or len(word) > config.max_length:
             del word_to_context[word]
 
