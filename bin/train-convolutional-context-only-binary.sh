@@ -9,17 +9,25 @@
 #
 # A model trained with this script achieved F1 of 0.6633 on the validation set.
 
-n_train=60000
+#n_train=60000
+n_train=0.9
 n_valid=4500
 model_dest=models/binary/convolutional_context_deep_residual
 vectors_path=data/vectors.pkl.gz
-pickle_path=data/contexts-100-min-100-max-per-word-length-3.pkl
-l2_penalty=0.000001
-n_hidden=10
-n_residual_blocks=10
-n_context_embed_dims=20
+pickle_path=data/contexts-100-min-100-max-per-word.pkl
+l2_penalty=0.000000
+n_hidden=100
+n_residual_blocks=4
+n_context_embed_dims=50
+n_context_filters=1000
+dropout_fc_p=0.0
+dropout_residual_p=0.0
+batch_normalization=false
+train_context_embeddings=true
+l2_penalty=0.0
 
+    #--mode persistent-background \
+    #--model-dest $model_dest \
 bin/train.py models/binary \
-    --mode persistent-background \
-    --model-dest $model_dest \
-    --model-cfg fully_connected="[$n_hidden]" n_residual_blocks=$n_residual_blocks n_hidden_residual=$n_hidden n_epoch=500 patience=50 samples_per_epoch=$n_train pickle_path=$pickle_path use_context_model=true context_model_type="convolutional" use_char_model=false batch_normalization=true class_weight_exponent=1 vectors_path=$vectors_path batch_size=100 n_val_samples=$n_valid optimizer=Adam n_context_embed_dims=$n_context_embed_dims train_size=$n_train validation_size=$n_valid l2_penalty=$l2_penalty dropout_residual_p=0.1 n_context_filters=100
+    --mode transient \
+    --model-cfg fully_connected="[$n_hidden]" n_residual_blocks=$n_residual_blocks n_hidden_residual=$n_hidden n_epoch=500 patience=50 samples_per_epoch=240000 pickle_path=$pickle_path use_context_model=true context_model_type="convolutional" use_char_model=false batch_normalization=$batch_normalization class_weight_exponent=1 vectors_path=$vectors_path batch_size=100 n_val_samples=$n_valid optimizer=Adam n_context_embed_dims=$n_context_embed_dims train_size=$n_train validation_size=$n_valid l2_penalty=$l2_penalty dropout_fc_p=$dropout_fc_p dropout_residual_p=$dropout_residual_p n_context_filters=$n_context_filters
