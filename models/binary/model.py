@@ -173,6 +173,7 @@ def build_char_model(graph, config):
         non_word_char_prev = outputs[0]
         real_word_char_prev = outputs[1]
 
+    # Not sure whether to add noise before or after batch normalization.
     if config.non_word_gaussian_noise_sd > 0.:
         graph.add_node(GaussianNoise(config.non_word_gaussian_noise_sd),
                 input=non_word_char_prev,
