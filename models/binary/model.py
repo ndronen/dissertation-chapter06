@@ -173,6 +173,12 @@ def build_char_model(graph, config):
         non_word_char_prev = outputs[0]
         real_word_char_prev = outputs[1]
 
+    if config.non_word_gaussian_noise_sd > 0.:
+        graph.add_node(GaussianNoise(config.non_word_gaussian_noise_sd),
+                input=non_word_char_prev,
+                name='non_word_char_noise')
+        non_word_char_prev = 'non_word_char_noise'
+
     graph.add_shared_node(Activation(config.activation),
             name='char_conv_act',
             inputs=[non_word_char_prev, real_word_char_prev],
@@ -192,6 +198,7 @@ def build_char_model(graph, config):
             name='char_flatten',
             inputs=['non_word_conv_pool', 'real_word_conv_pool'],
             outputs=[non_word_flatten, 'real_word_flatten'])
+
 
     if config.use_non_word_output_mlp:
         layer_basename = non_word_flatten
@@ -377,12 +384,6 @@ def build_model(config, n_classes, context_embedding_weights=None):
 
     if config.use_char_model:
         non_word_output, real_word_output, char_merge_output = build_char_model(graph, config)
-
-        if config.non_word_gaussian_noise_sd > 0.:
-            graph.add_node(GaussianNoise(config.non_word_gaussian_noise_sd),
-                    input=non_word_output,
-                    name='non_word_output_noise')
-            non_word_output = 'non_word_output_noise'
 
         if config.char_merge_gaussian_noise_sd > 0.:
             graph.add_node(GaussianNoise(config.char_merge_gaussian_noise_sd),
@@ -756,7 +757,7 @@ def load_data(config):
     loader = MulticlassLoader(pickle_path=config.pickle_path)
     word_to_context = loader.load()
 
-    config.logger('%d contexts before digit filtering' %
+    config.logger('%d contexts before filtering' %
             count_contexts(word_to_context))
 
     # Drop any contexts that contain 'digit'.
@@ -764,7 +765,40 @@ def load_data(config):
     for word,contexts in word_to_context.items():
         word_to_context[word] = filter.transform(contexts)
 
-    config.logger('%d contexts after digit filtering' %
+    # Filter by length of word.
+    config.logger('%d word_to_context words before length filtering' %
+            len(word_to_context))
+
+    def tolist(keys):
+        print("tolist")
+        return list(keys)
+
+    for word in tolist(word_to_context.keys()):
+        if len(word) < config.min_length or len(word) > config.max_length:
+            del word_to_context[word]
+
+    config.logger('%d word_to_context words after length filtering' %
+            len(word_to_context))
+
+    # Filter by number of contexts in which word appears.
+    context_lengths = []
+    words_to_delete = []
+    for word,contexts in word_to_context.items():
+        if len(contexts) < config.min_contexts or len(contexts) > config.max_contexts:
+            words_to_delete.append(word)
+            continue
+        context_lengths.append(len(contexts))
+
+    for word in words_to_delete:
+        del word_to_context[word]
+
+    config.logger('%d word_to_context words after context length filtering' %
+            len(word_to_context))
+
+    config.logger('min contexts %d max %d' %
+            (min(context_lengths), max(context_lengths)))
+
+    config.logger('%d contexts after filtering' %
             count_contexts(word_to_context))
 
     # Tokenize the contexts.

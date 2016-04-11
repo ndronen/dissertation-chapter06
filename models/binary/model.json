@@ -11,6 +11,8 @@
     "max_edits": 1,
     "count_vectorizer_min_df": 10,
     "preload_retriever_cache": false,
+    "train_only_return_candidates_in_vocabulary": true,
+    "valid_only_return_candidates_in_vocabulary": true,
     "use_real_word_examples": false,
     "class_weight_exponent": 1,
     "patience": 10,
@@ -24,6 +26,7 @@
     "validation_size": 5000,
     "n_val_samples": 5000,
     "fixed_callback_validation_data": true,
+    "activation": "relu",
 
     "exclude_candidates_containing_hyphen_or_space": true,
     "n_random_train_candidates": 0,
@@ -31,11 +34,13 @@
     "n_train_neighbors": 0,
     "bottom_k_candidates_only": 0,
 
-    "pickle_path": "data/contexts-100-min-100-max-per-word.pkl",
+    "pickle_path": "data/contexts-100-min-1000-max-per-word.pkl",
     "vectors_path": "data/vectors.pkl.gz",
     "min_frequency": 0,
-    "min_length": 0,
-    "max_length": 0,
+    "min_length": 3,
+    "max_length": 4,
+    "min_contexts": 50,
+    "max_contexts": 1000,
 
     "merge_mode": "concat",
 
