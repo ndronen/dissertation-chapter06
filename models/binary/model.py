@@ -121,7 +121,7 @@ def add_bn_relu(graph, config, prev_layer):
     if config.batch_normalization:
         graph.add_node(BatchNormalization(), name=bn_name, input=prev_layer)
         prev_layer = bn_name
-    graph.add_node(Activation('relu'), name=relu_name, input=prev_layer)
+    graph.add_node(Activation(config.activation), name=relu_name, input=prev_layer)
     return relu_name
 
 def build_char_model(graph, config):
@@ -173,7 +173,7 @@ def build_char_model(graph, config):
         non_word_char_prev = outputs[0]
         real_word_char_prev = outputs[1]
 
-    graph.add_shared_node(Activation('relu'),
+    graph.add_shared_node(Activation(config.activation),
             name='char_conv_act',
             inputs=[non_word_char_prev, real_word_char_prev],
             outputs=['non_word_conv_act', 'real_word_conv_act'])
@@ -448,8 +448,8 @@ def build_model(config, n_classes, context_embedding_weights=None):
         if config.batch_normalization:
             graph.add_node(BatchNormalization(), name=layer_name+'bn', input=prev_layer)
             prev_layer = layer_name+'bn'
-        graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
-        prev_layer = layer_name+'relu'
+        graph.add_node(Activation(config.activation), name=layer_name+config.activation, input=prev_layer)
+        prev_layer = layer_name+config.activation
         if config.dropout_fc_p > 0.:
             graph.add_node(Dropout(config.dropout_fc_p), name=layer_name+'do', input=prev_layer)
             prev_layer = layer_name+'do'
@@ -481,15 +481,15 @@ def build_model(config, n_classes, context_embedding_weights=None):
                 prev_layer = layer_name+'bn'
     
             if i < n_layers_per_residual_block:
-                graph.add_node(Activation('relu'), name=layer_name+'relu', input=prev_layer)
-                prev_layer = layer_name+'relu'
+                graph.add_node(Activation(config.activation), name=layer_name+config.activation, input=prev_layer)
+                prev_layer = layer_name+config.activation
                 if config.dropout_residual_p > 0.:
                     graph.add_node(Dropout(config.dropout_residual_p), name=layer_name+'do', input=prev_layer)
                     prev_layer = layer_name+'do'
 
         graph.add_node(Identity(), name=block_name+'output', inputs=[block_input_layer, prev_layer], merge_mode='sum')
-        graph.add_node(Activation('relu'), name=block_name+'relu', input=block_name+'output')
-        prev_layer = block_input_layer = block_name+'relu'
+        graph.add_node(Activation(config.activation), name=block_name+config.activation, input=block_name+'output')
+        prev_layer = block_input_layer = block_name+config.activation
 
     if prev_layer is None:
         softmax_inputs.extend(dense_inputs)
@@ -680,7 +680,7 @@ def build_callbacks(config, generator, n_samples, other_generators={}):
 retriever_lock = threading.Lock()
 
 # Retrievers
-def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neighbors=0, bottom_candidates=0, exclude_candidates_containing_hyphen_or_space=False):
+def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neighbors=0, bottom_candidates=0, exclude_candidates_containing_hyphen_or_space=False, only_return_candidates_in_vocabulary=False):
     with retriever_lock:
         retrievers = []
         retrievers.append(spelldict.AspellRetriever())
@@ -702,6 +702,11 @@ def build_retriever(vocabulary, n_random_candidates=0, max_candidates=0, n_neigh
 
         if exclude_candidates_containing_hyphen_or_space:
             fltr = lambda word: ' ' not in word and '-' not in word
+            retriever = spelldict.FilteringRetriever(retriever, fltr)
+
+        if only_return_candidates_in_vocabulary:
+            filter_vocabulary = set(vocabulary)
+            fltr = lambda word: word in filter_vocabulary
             retriever = spelldict.FilteringRetriever(retriever, fltr)
 
         if max_candidates > 0:
@@ -821,18 +826,38 @@ def setup(config):
             vocabulary=vocabulary,
             output_width=config.context_input_width)
 
+    train_retriever_vocabulary = vocabulary
+    if config.train_only_return_candidates_in_vocabulary:
+        train_retriever_vocabulary = list(word_to_context.keys())
+
     train_retriever = build_retriever(
-                list(vocabulary.keys()), 
+                train_retriever_vocabulary,
                 n_random_candidates=config.n_random_train_candidates,
                 max_candidates=config.max_train_candidates,
                 n_neighbors=config.n_train_neighbors,
                 bottom_candidates=config.bottom_k_candidates_only,
-                exclude_candidates_containing_hyphen_or_space=config.exclude_candidates_containing_hyphen_or_space)
+                exclude_candidates_containing_hyphen_or_space=config.exclude_candidates_containing_hyphen_or_space,
+                only_return_candidates_in_vocabulary=config.train_only_return_candidates_in_vocabulary)
 
     config.logger('train_retriever %s' % str(type(train_retriever)))
 
-    valid_retriever = build_retriever(list(vocabulary.keys()),
-                exclude_candidates_containing_hyphen_or_space=config.exclude_candidates_containing_hyphen_or_space)
+    # To be fair to the dictionary baseline, the retriever used for
+    # validation should only consider candidates from the set of words
+    # that the model is trained to correct.  We do it this way because
+    # when the model is trained to correct a small subset of a dictionary,
+    # such as when focusing on short words, the model might learn that
+    # the correct word for the training examples belongs to the small
+    # subset; if we don't remove from the dictionary the words that are
+    # not in that subset, the candidate list returned by the dictionary
+    # may contain words that are never the true correction, and the model
+    # may learn to detect this.
+    valid_retriever_vocabulary = vocabulary
+    if config.valid_only_return_candidates_in_vocabulary:
+        valid_retriever_vocabulary = list(word_to_context.keys())
+    valid_retriever = build_retriever(
+                valid_retriever_vocabulary,
+                exclude_candidates_containing_hyphen_or_space=config.exclude_candidates_containing_hyphen_or_space,
+                only_return_candidates_in_vocabulary=config.valid_only_return_candidates_in_vocabulary)
 
     if config.preload_retriever_cache:
         train_retriever.load_cache(verbose=True)
