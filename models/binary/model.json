@@ -1,6 +1,6 @@
 {
     "description": "binary classification model that predicts the true correction for a spelling error given the error and its context, where the non-word in the context has been replaced by a dictionary suggestion",
-    "context_model_type": "convolutional_context",
+    "context_model_type": "convolutional",
     "non_word_char_input_name": "non_word_char_input",
     "real_word_char_input_name": "real_word_char_input",
     "real_word_input_name": "real_word_input",
@@ -34,7 +34,7 @@
     "n_train_neighbors": 0,
     "bottom_k_candidates_only": 0,
 
-    "pickle_path": "data/contexts-100-min-1000-max-per-word.pkl",
+    "pickle_path": "data/contexts-100-min-100-max-per-word.pkl",
     "vectors_path": "data/vectors.pkl.gz",
     "min_frequency": 0,
     "min_length": 3,
